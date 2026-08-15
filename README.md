@@ -76,9 +76,15 @@ wrong spectrogram that still separated snares from pads would score well here.
 
 ## Known limits
 
-- **The mel parameters are unvalidated against Essentia's own implementation.** They
-  follow the documented recipe and behave correctly on synthetic signals, but proving
-  they match would mean running Essentia, which has no Windows build.
+- 🛑 **The spectrograms do NOT match Essentia's** — validated 2026-08-15, and this is
+  the big one. Frame and band counts are right; the values are not (correlation
+  0.88–0.98, no constant relationship). The models were trained on Essentia's
+  spectrograms, so they are being fed something they have not seen. Enough structure
+  survives that output looks plausible rather than broken, which is why it went
+  unnoticed — and it may well be why the numbers above are what they are. **Treat the
+  accuracy figures as a measurement of this system today, not of the models'
+  ability.** Full findings, tooling and the two candidate fixes are in
+  [`docs/MEL_VALIDATION.md`](docs/MEL_VALIDATION.md).
 - Heads trained on full music tracks are unreliable on one-shots. The bridge suppresses
   those verdicts below ~2 s rather than reporting confident nonsense.
 - Preset preview audio describes a *performance* as well as a sound.
