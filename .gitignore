@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# MODELS — never committed. They are CC BY-NC-SA 4.0 (NonCommercial, ShareAlike),
+# not ours to redistribute, and they live outside the repo anyway (~/.ai-bridge/models).
+*.onnx
+*.pb
+models/
+
+# The index itself: generated, large, and full of your own file paths.
+*.db
+*.db-wal
+*.db-shm
+sound_index*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Private agent-instruction files — kept LOCAL, never published.
+CLAUDE.md
+AGENTS.md
+.claude/
