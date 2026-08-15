@@ -21,6 +21,8 @@ from dataclasses import dataclass
 import numpy as np
 import soundfile as sf
 
+from . import features
+
 TARGET_SR = 16000
 MAX_SECONDS = 30.0          # a 10-minute stem tells us nothing a preview does not
 
@@ -88,6 +90,9 @@ class Decoded:
     sample_rate: int | None
     channels: int | None
     error: str | None = None
+    #: Measured facts from ``features.analyze`` — pitch or key, tempo, width, envelope,
+    #: loudness. None if measurement failed; that is not fatal to the tags.
+    properties: dict | None = None
 
 
 def _resample(x: np.ndarray, src_sr: int) -> np.ndarray:
@@ -268,4 +273,13 @@ def process_file(path: str) -> Decoded:
     except Exception as exc:                                   # noqa: BLE001
         return Decoded(path, None, duration, sr, channels,
                        f"{type(exc).__name__}: {exc}"[:300])
-    return Decoded(path, patches, duration, sr, channels, None)
+
+    # Measured features come off the SAME decode — `audio` is still stereo at its own
+    # rate, which is the only moment stereo width can be measured, and `mono` is the
+    # 16 kHz signal the mel already needed. A failure here costs the properties, never
+    # the tags: measurement is the optional half.
+    try:
+        properties = features.analyze(audio, sr, mono, duration)
+    except Exception as exc:                                   # noqa: BLE001
+        properties = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+    return Decoded(path, patches, duration, sr, channels, None, properties)

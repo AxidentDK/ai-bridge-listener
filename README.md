@@ -86,5 +86,48 @@ wrong spectrogram that still separated snares from pads would score well here.
 - Heads trained on full music tracks are unreliable on one-shots. The bridge suppresses
   those verdicts below ~2 s rather than reporting confident nonsense.
 - Preset preview audio describes a *performance* as well as a sound.
+- **A one-shot is not necessarily one NOTE.** A chord stab is a single hit carrying a
+  whole chord, and it still gets a single fundamental — which may be any tone in the
+  voicing. Measured against files that name their own note, the pitch class agrees
+  **71%** of the time, and nearly every disagreement is a chord.
+
+## What it measures, as well as what it hears
+
+Tags answer "what does this sound like". These answer "what IS it", and they are
+computed off the same decode, so they are close to free.
+
+**Onset density routes the analysis.** A one-shot gets a fundamental; a loop gets a key
+and a tempo. This is not an optimisation — computing both for everything fills the
+index with confident junk, and a NULL is the honest answer where a number would lie.
+
+| | one-shot | loop |
+|---|---|---|
+| tonality | YIN fundamental, as Hz and a MIDI note | chroma key, scale, strength |
+| tempo | — | BPM with a confidence |
+
+Both also get **stereo width** (side/(mid+side) *above 250 Hz* — measured broadband, the
+standard mono-bass/wide-highs shape averages out to "narrow"), **inter-channel
+correlation** (below zero means the mono sum cancels), **attack** (time to the peak of
+the first hit, so a caller can correct MIDI placement for a sample with a slow run-up),
+**T60 decay**, and **integrated loudness** to BS.1770-4.
+
+The 1280-dim embedding each file's tags came from is stored as float16, so a classifier
+can be trained on the library without decoding it again.
+
+### How good are the measurements?
+
+Filenames are again the ground truth, and again noisy — but a file called
+`Drumloop 11 170BPM.wav` is a real claim about itself.
+
+| | |
+|---|---|
+| Tempo within 2.5 BPM of the stated one | **65%** |
+| Tempo right, or out by an exact octave/factor | **86%** |
+| Pitch class matching a note named in the filename | **71%** |
+
+**Tempo is the weakest number here and the reasons are known.** Octave and metrical
+ambiguity is genuine — a 170 BPM drum-and-bass loop read as 85 is musically the same
+tempo — and the remaining errors concentrate on material with a strong dotted-eighth
+layer. Every estimate carries a confidence, so a caller can demand better.
 
 Apache-2.0.

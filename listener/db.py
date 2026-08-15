@@ -15,7 +15,11 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+import numpy as np
+
+#: v2 adds the MEASURED half — the `properties` columns that route off one-shot vs
+#: loop, and an `embeddings` table. v1 shipped `properties` and never wrote a row to it.
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -45,17 +49,41 @@ CREATE TABLE IF NOT EXISTS tags (
 );
 CREATE TABLE IF NOT EXISTS properties (
     file_id        INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    kind           TEXT,
+    onsets         INTEGER,
     bpm            REAL,
     bpm_confidence REAL,
     key            TEXT,
     scale          TEXT,
     key_strength   REAL,
+    pitch_hz       REAL,
+    pitch_midi     INTEGER,
+    pitch_confidence REAL,
+    attack_ms      REAL,
+    decay_ms       REAL,
+    stereo_width   REAL,
+    stereo_correlation REAL,
     danceability   REAL,
     loudness_lufs  REAL
 );
+CREATE TABLE IF NOT EXISTS embeddings (
+    file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+    dim     INTEGER NOT NULL,
+    dtype   TEXT NOT NULL,
+    vector  BLOB NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_tags_lookup ON tags(namespace, label, confidence DESC);
 CREATE INDEX IF NOT EXISTS idx_files_path  ON files(path);
+CREATE INDEX IF NOT EXISTS idx_props_kind  ON properties(kind);
 """
+
+#: Every column ``record`` writes into ``properties``. Named once so the writer and
+#: the schema cannot drift apart silently.
+PROPERTY_COLUMNS = (
+    "kind", "onsets", "bpm", "bpm_confidence", "key", "scale", "key_strength",
+    "pitch_hz", "pitch_midi", "pitch_confidence", "attack_ms", "decay_ms",
+    "stereo_width", "stereo_correlation", "danceability", "loudness_lufs",
+)
 
 
 def _utc_now() -> str:
@@ -75,6 +103,7 @@ class Store:
         # point of a resumable job you can leave running.
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
+        self._migrate_if_older()
         self.conn.executescript(SCHEMA_SQL)
         self._set_meta("schema_version", str(SCHEMA_VERSION))
         self._set_meta("analyzer", analyzer)
@@ -98,13 +127,42 @@ class Store:
                 for r in self.conn.execute(
                     "SELECT path, size_bytes, mtime, analyzer FROM files")}
 
+    def _migrate_if_older(self) -> None:
+        """Rebuild the derived tables when the schema version has moved on.
+
+        ``CREATE TABLE IF NOT EXISTS`` does NOT add columns to a table that already
+        exists — it silently does nothing and the run then stamps the NEW version onto
+        the OLD tables, which is a database that lies about its own shape. Everything
+        here is derived from audio files that are still on disk, so dropping and
+        rebuilding is a re-scan, not data loss. ``meta`` is kept.
+        """
+        try:
+            row = self.conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        except sqlite3.OperationalError:
+            return                                    # brand new database
+        if row is None:
+            return
+        try:
+            existing = int(row["value"])
+        except (TypeError, ValueError):
+            existing = -1
+        if existing == SCHEMA_VERSION:
+            return
+        print(f"  schema {existing} -> {SCHEMA_VERSION}: rebuilding derived tables "
+              f"(every file is re-analysed on a version change anyway)")
+        for table in ("embeddings", "properties", "tags", "files"):
+            self.conn.execute(f"DROP TABLE IF EXISTS {table}")   # noqa: S608
+        self.conn.commit()
+
     # ---- writing ------------------------------------------------------------
 
     def record(self, path: str, *, size: int, mtime: float, source_path: str | None = None,
                duration: float | None = None, sample_rate: int | None = None,
                channels: int | None = None, error: str | None = None,
                tags: list[tuple[str, str, float, str]] | None = None,
-               properties: dict | None = None) -> int:
+               properties: dict | None = None,
+               embedding=None) -> int:
         """Upsert one file and its results. Returns the file id.
 
         A FAILED file is recorded with ``error`` set rather than left out, so the
@@ -135,8 +193,7 @@ class Store:
                 "model) VALUES(?,?,?,?,?)",
                 [(file_id, ns, label, conf, model) for ns, label, conf, model in tags])
         if properties:
-            cols = ["bpm", "bpm_confidence", "key", "scale", "key_strength",
-                    "danceability", "loudness_lufs"]
+            cols = list(PROPERTY_COLUMNS)
             vals = [properties.get(c) for c in cols]
             self.conn.execute(
                 f"INSERT INTO properties(file_id, {', '.join(cols)}) "  # noqa: S608
@@ -144,6 +201,17 @@ class Store:
                 f"ON CONFLICT(file_id) DO UPDATE SET "
                 + ", ".join(f"{c}=excluded.{c}" for c in cols),
                 [file_id, *vals])
+        if embedding is not None and len(embedding):
+            # float16 halves the footprint for a vector whose values sit well inside
+            # its range; 22,100 x 1280 is ~56 MB stored, against ~113 MB at float32.
+            # Stored so the drum classifier can be trained and RE-trained without
+            # paying the 14-minute extraction again.
+            vec = np.asarray(embedding, dtype=np.float16)
+            self.conn.execute(
+                "INSERT INTO embeddings(file_id, dim, dtype, vector) VALUES(?,?,?,?) "
+                "ON CONFLICT(file_id) DO UPDATE SET dim=excluded.dim, "
+                "dtype=excluded.dtype, vector=excluded.vector",
+                (file_id, int(vec.size), "float16", vec.tobytes()))
         return file_id
 
     def commit(self) -> None:

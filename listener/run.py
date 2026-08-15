@@ -87,7 +87,8 @@ class Tagger:
         # dutifully skipped all 22,100 files and reported success without re-analysing
         # anything. Resumability worked; the version was an incomplete description of
         # the analysis.
-        self.version = (f"{decode.MEL_VERSION}+discogs-effnet-1+{len(self.heads)}heads-1"
+        self.version = (f"{decode.MEL_VERSION}+{decode.features.FEATURE_VERSION}"
+                        f"+discogs-effnet-1+{len(self.heads)}heads-1"
                         + (f"+yamnet-1(k{EVENT_TOP_K},f{EVENT_FLOOR})"
                            if self.yamnet else ""))
 
@@ -131,11 +132,19 @@ class Tagger:
                 for i in order if scores[i] >= floor]
 
     def tag(self, patches: dict, style_top_k: int = 3, style_floor: float = 0.10):
-        """patches: {'effnet': [...], 'yamnet': [...]} from one decode."""
+        """patches: {'effnet': [...], 'yamnet': [...]} from one decode.
+
+        Returns (tags, embedding). The embedding is handed back rather than discarded
+        because it is the input a drum classifier needs, and re-deriving it means
+        decoding the whole library again — 14 minutes to recover something that was
+        already in memory.
+        """
         out: list[tuple[str, str, float, str]] = []
+        embedding = None
         eff = patches.get("effnet") if isinstance(patches, dict) else patches
         if eff is not None and len(eff):
             emb, style = self.embed(eff)
+            embedding = emb
             for name, head in self.heads.items():
                 for label, score in self._tags_for(head, emb):
                     out.append((name, label, score, self.version))
@@ -145,7 +154,7 @@ class Tagger:
                          self.version) for i in order if style[i] >= style_floor]
         if isinstance(patches, dict):
             out += self.tag_events(patches.get("yamnet"))
-        return out
+        return out, embedding
 
 
 def run(db_path: Path, candidates: list[scan.Candidate], workers: int | None = None,
@@ -175,7 +184,7 @@ def run(db_path: Path, candidates: list[scan.Candidate], workers: int | None = N
             except Exception as exc:                            # noqa: BLE001
                 res = decode.Decoded(cand.path, None, None, None, None,
                                      f"worker died: {exc}"[:300])
-            tags = None
+            tags = embedding = None
             error = res.error
             # res.patches is now {config_name: array}; "did we get anything usable"
             # means at least one config produced patches, not that the dict exists.
@@ -184,15 +193,22 @@ def run(db_path: Path, candidates: list[scan.Candidate], workers: int | None = N
             if error is None and usable:
                 if tagger:
                     try:
-                        tags = tagger.tag(res.patches)
+                        tags, embedding = tagger.tag(res.patches)
                     except Exception as exc:                    # noqa: BLE001
                         error = f"tagging failed: {exc}"[:300]
             elif error is None:
                 error = "no audio decoded"
 
+            # A measurement failure is recorded as a missing property, not as a failed
+            # file: the tags are still good, and dropping them over a bad pitch
+            # estimate would trade the expensive half for the cheap one.
+            properties = res.properties or None
+            if properties and properties.get("error"):
+                properties = None
             store.record(cand.path, size=cand.size, mtime=cand.mtime,
                          duration=res.duration_sec, sample_rate=res.sample_rate,
-                         channels=res.channels, error=error, tags=tags)
+                         channels=res.channels, error=error, tags=tags,
+                         properties=properties, embedding=embedding)
             done += 1
             failed += bool(error)
             if done % COMMIT_EVERY == 0:
