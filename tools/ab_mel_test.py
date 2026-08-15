@@ -19,6 +19,7 @@ Run inside WSL:
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -32,7 +33,11 @@ from listener.db import Store  # noqa: E402
 import essentia.standard as es  # noqa: E402
 import onnxruntime as ort  # noqa: E402
 
-MODELS = Path("/mnt/c/Users/Kim/.ai-bridge/models")
+#: Where the ONNX models and head weights live. Under WSL this is on the Windows
+#: side, which `Path.home()` cannot reach — so the runner passes it in rather than
+#: anyone hardcoding a path with a username in it.
+MODELS = Path(os.environ.get("AI_BRIDGE_MODELS",
+                             str(Path.home() / ".ai-bridge" / "models")))
 EVENT_TOP_K, EVENT_FLOOR = 15, 0.02
 BATCH = 8
 

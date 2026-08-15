@@ -19,6 +19,14 @@ export CUDA_VISIBLE_DEVICES=""
 PY="$HOME/essentia-venv/bin/python"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# The models sit on the WINDOWS side, which $HOME inside WSL cannot reach. Derive the
+# location from this script's own path (tools/ -> repo -> repos -> source -> home)
+# rather than hardcoding a path containing a username. Override by exporting
+# AI_BRIDGE_MODELS before calling.
+if [ -z "${AI_BRIDGE_MODELS:-}" ]; then
+    export AI_BRIDGE_MODELS="$(cd "$HERE/../../../.." 2>/dev/null && pwd)/.ai-bridge/models"
+fi
+
 [ -x "$PY" ] || { echo "no venv at $PY — see the header for setup"; exit 1; }
 
 case "${1:-}" in
