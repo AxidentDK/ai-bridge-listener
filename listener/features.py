@@ -28,7 +28,9 @@ import numpy as np
 
 #: Bump when anything here changes what gets STORED. It joins the analyzer version
 #: string for the same reason ``MEL_VERSION`` does — see the warning in ``decode``.
-FEATURE_VERSION = "feat1"
+#: feat2 = pitch estimates must have spectral support (subsonic subharmonics were
+#:         being reported with 0.7-0.8 confidence); bar count stored with tempo.
+FEATURE_VERSION = "feat2"
 
 ANALYSIS_SR = 16000          # the mel pass already produced this; reuse it
 
@@ -90,6 +92,10 @@ _PITCH_MAX_FLATNESS = 0.35
 #: kick at 47 Hz, a snare at 99 Hz — scored 0.41 to 0.99. The confidence is STORED
 #: rather than only applied, so a caller can be stricter than this without a re-scan.
 _YIN_MIN_CONFIDENCE = 0.4
+#: A claimed fundamental must carry at least this share of the strongest partial's
+#: magnitude, or it is not in the sound. Deliberately low — a missing-fundamental
+#: timbre is real and common — but a subsonic subharmonic scores essentially zero.
+_PITCH_SUPPORT = 0.05
 
 # --- key (ported from the bridge's describe.py) ----------------------------------
 
@@ -364,9 +370,47 @@ def pitch(mono: np.ndarray, peak_idx: int, sr: int = ANALYSIS_SR) -> dict:
     hz = float(sr) / float(tau)
     if not (_YIN_MIN_HZ <= hz <= _YIN_MAX_HZ):
         return {}
+
+    # DOES THE SPECTRUM AGREE? YIN works on periodicity alone, so on complex or
+    # polyphonic material it happily locks to a SUBHARMONIC — a period that divides
+    # every real partial while carrying no energy of its own. Measured on real files:
+    # a stab whose strongest partial is E2 at 165 Hz was reported at 27.4 Hz, and a
+    # chord whose partials are C#3/G#3/F#2 at 30.7 Hz. Both scored 0.72-0.84
+    # confidence, so the confidence floor cannot catch this; only looking at the
+    # spectrum can. Neither answer had any energy within a semitone of itself.
+    hz, confidence = _agree_with_spectrum(x, sr, hz, confidence)
+    if hz is None:
+        return {}
     return {"pitch_hz": round(hz, 2),
             "pitch_midi": int(round(69 + 12 * np.log2(hz / 440.0))),
             "pitch_confidence": round(confidence, 3)}
+
+
+def _agree_with_spectrum(x: np.ndarray, sr: int, hz: float,
+                         confidence: float) -> tuple[float | None, float]:
+    """Keep a YIN estimate only if the spectrum has energy there; else use the peak.
+
+    Returns (hz, confidence), or (None, _) when nothing musical is present at all.
+    The fallback is the strongest spectral peak, which for the cases above is the
+    named note itself — and its confidence is cut, because an estimate that had to be
+    overruled is a weaker claim than one the two methods agreed on.
+    """
+    spec = np.abs(np.fft.rfft(x * np.hanning(len(x))))
+    freqs = np.fft.rfftfreq(len(x), 1.0 / sr)
+    usable = (freqs >= _YIN_MIN_HZ) & (freqs <= _YIN_MAX_HZ)
+    if not usable.any() or not spec[usable].any():
+        return None, confidence
+    spec_u, freqs_u = spec[usable], freqs[usable]
+    peak = float(spec_u.max())
+
+    # Within a semitone of the claimed fundamental.
+    near = np.abs(np.log2(np.maximum(freqs_u, 1e-9) / hz)) < (1.0 / 12.0)
+    if near.any() and float(spec_u[near].max()) >= _PITCH_SUPPORT * peak:
+        return hz, confidence
+    strongest = float(freqs_u[int(np.argmax(spec_u))])
+    if not (_YIN_MIN_HZ <= strongest <= _YIN_MAX_HZ):
+        return None, confidence
+    return strongest, confidence * 0.6
 
 
 def spectral_flatness(mono: np.ndarray) -> float:
@@ -440,7 +484,7 @@ _BAR_CANDIDATES = (1, 2, 4, 8, 16, 32)
 _SNAP_MAX_LOG2 = 0.6
 
 
-def _snap_to_whole_bars(bpm: float, duration: float | None) -> tuple[float, bool]:
+def _snap_to_whole_bars(bpm: float, duration: float | None) -> tuple[float, int | None]:
     """Pull a tempo estimate onto the nearest tempo that makes the file whole bars.
 
     Sample-library loops are cut to a whole number of bars, so their LENGTH already
@@ -451,17 +495,24 @@ def _snap_to_whole_bars(bpm: float, duration: float | None) -> tuple[float, bool
     stated a BPM were being reported at exactly 4/3 of it, and checking their
     durations showed every one to be 4.000 bars at the STATED tempo. The filenames
     were right; the estimator was hearing a dotted-eighth layer as the beat.
+
+    Returns the tempo and the BAR COUNT it implies, which is stored. That matters
+    because a tempo and its double are NOT interchangeable — the same pulse written
+    at 85 and at 170 differs in note values, so the grid, the swing and every
+    quantise decision differ with it. The bar count is the evidence for which of the
+    two a file actually is, and storing it makes the claim checkable instead of
+    asserted.
     """
     if not duration or duration <= 0:
-        return bpm, False
-    candidates = [240.0 * n / duration for n in _BAR_CANDIDATES]
-    candidates = [c for c in candidates if _BPM_MIN <= c <= _BPM_MAX]
-    if not candidates:
-        return bpm, False
-    best = min(candidates, key=lambda c: abs(np.log2(c / bpm)))
+        return bpm, None
+    pairs = [(240.0 * n / duration, n) for n in _BAR_CANDIDATES]
+    pairs = [(c, n) for c, n in pairs if _BPM_MIN <= c <= _BPM_MAX]
+    if not pairs:
+        return bpm, None
+    best, bars = min(pairs, key=lambda p: abs(np.log2(p[0] / bpm)))
     if abs(np.log2(best / bpm)) <= _SNAP_MAX_LOG2:
-        return best, True
-    return bpm, False
+        return best, bars
+    return bpm, None
 
 
 def tempo(onsets: np.ndarray, flux: np.ndarray | None = None,
@@ -523,7 +574,7 @@ def tempo(onsets: np.ndarray, flux: np.ndarray | None = None,
                     if abs(denom) > 1e-12:
                         lag = lag + float(np.clip((a - c) / denom, -0.5, 0.5))
                 bpm = 60.0 * frames_per_sec / float(lag)
-                bpm, snapped = _snap_to_whole_bars(bpm, duration)
+                bpm, bars = _snap_to_whole_bars(bpm, duration)
                 if _BPM_MIN <= bpm <= _BPM_MAX:
                     # Confidence is how much the winning lag stands out from the
                     # search band, not the raw correlation — a slowly decaying
@@ -533,13 +584,14 @@ def tempo(onsets: np.ndarray, flux: np.ndarray | None = None,
                     spread = float(band.std()) or 1e-9
                     clarity = (peak - float(band.mean())) / spread
                     confidence = min(1.0, max(0.0, clarity / 3.0))
-                    if snapped:
+                    if bars:
                         # Two independent lines of evidence agreeing — the envelope's
                         # own periodicity and the file's length — is worth more than
                         # either alone.
                         confidence = min(1.0, confidence + 0.1)
                     return {"bpm": round(bpm, 1),
-                            "bpm_confidence": round(confidence, 2)}
+                            "bpm_confidence": round(confidence, 2),
+                            "bars": bars}
 
     if len(onsets) < 4:
         return {}

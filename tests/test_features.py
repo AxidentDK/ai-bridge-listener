@@ -65,6 +65,31 @@ def test_pitch_finds_the_fundamental_of_an_808_not_its_octave():
     assert got is not None and _cents(got, f0) < 20, f"expected ~{f0}, got {got}"
 
 
+def test_pitch_is_refused_when_the_spectrum_has_nothing_there():
+    """YIN measures PERIODICITY, so on complex material it locks to a subharmonic —
+    a period that divides every real partial while carrying no energy of its own.
+    Real files: a stab whose strongest partial is E2 (165 Hz) was reported at 27.4 Hz,
+    and a chord of C#3/G#3/F#2 at 30.7 Hz. Both scored 0.72-0.84 confidence, so the
+    confidence floor cannot catch it — only the spectrum can.
+
+    Built here as a signal with partials at 3x, 4x and 5x a fundamental that is not
+    present, which is the shape that provokes it.
+    """
+    sr = SR
+    t = np.arange(int(0.6 * sr)) / sr
+    base = 55.0
+    x = sum(np.sin(2 * np.pi * base * k * t) for k in (3, 4, 5))
+    x = (x * np.exp(-t * 2)).astype(np.float32)
+    got = F.pitch(x, 0)
+    if got.get("pitch_hz") is not None:
+        # Whatever is reported must actually EXIST in the sound.
+        spec = np.abs(np.fft.rfft(x * np.hanning(len(x))))
+        freqs = np.fft.rfftfreq(len(x), 1.0 / sr)
+        near = np.abs(freqs - got["pitch_hz"]) < 6
+        assert near.any() and spec[near].max() >= 0.05 * spec.max(), (
+            f"reported {got['pitch_hz']} Hz, which carries no energy")
+
+
 def test_noise_gets_no_pitch():
     """A hi-hat has no fundamental. An estimator asked anyway still returns a number,
     so the flatness gate has to refuse the question."""

@@ -19,7 +19,9 @@ import numpy as np
 
 #: v2 adds the MEASURED half — the `properties` columns that route off one-shot vs
 #: loop, and an `embeddings` table. v1 shipped `properties` and never wrote a row to it.
-SCHEMA_VERSION = 2
+#: v3 adds `bars`: a tempo and its double are not the same tempo, and the bar count is
+#: the evidence for which one a file is.
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -53,6 +55,7 @@ CREATE TABLE IF NOT EXISTS properties (
     onsets         INTEGER,
     bpm            REAL,
     bpm_confidence REAL,
+    bars           INTEGER,
     key            TEXT,
     scale          TEXT,
     key_strength   REAL,
@@ -80,7 +83,7 @@ CREATE INDEX IF NOT EXISTS idx_props_kind  ON properties(kind);
 #: Every column ``record`` writes into ``properties``. Named once so the writer and
 #: the schema cannot drift apart silently.
 PROPERTY_COLUMNS = (
-    "kind", "onsets", "bpm", "bpm_confidence", "key", "scale", "key_strength",
+    "kind", "onsets", "bpm", "bpm_confidence", "bars", "key", "scale", "key_strength",
     "pitch_hz", "pitch_midi", "pitch_confidence", "attack_ms", "decay_ms",
     "stereo_width", "stereo_correlation", "danceability", "loudness_lufs",
 )
