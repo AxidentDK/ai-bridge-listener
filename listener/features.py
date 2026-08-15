@@ -413,6 +413,172 @@ def _agree_with_spectrum(x: np.ndarray, sr: int, hz: float,
     return strongest, confidence * 0.6
 
 
+# --- what KIND of tone is this: one note, a chord, or neither ---------------------
+
+#: Share of strong-partial energy that ONE harmonic series must explain before the
+#: sound counts as a single note. Set from measurement: real single notes score
+#: 0.97-1.00 and chords 0.44-0.78 (Cohen d 1.26 between the groups).
+_HARMONIC_FIT = 0.85
+#: How far a partial may sit from an exact integer multiple and still count. Real
+#: instruments are slightly inharmonic (string stiffness), and the FFT bin is finite.
+_HARMONIC_TOLERANCE = 0.045
+_PARTIAL_FLOOR = 0.10           # a partial must reach this share of the loudest
+_MAX_PARTIALS = 12
+
+TONAL_HARMONIC = "harmonic"     # one note: partials fit a single harmonic series
+TONAL_CHORD = "chord"           # several notes: leftovers form a recognisable chord
+TONAL_INHARMONIC = "inharmonic"  # FM, bells, metal — real partials, no series, no chord
+
+#: Chord qualities by their interval sets in semitones from the root. Semitones, not
+#: FREQUENCY RATIOS: a just-intonation major third is 1.25 and an equal-tempered one
+#: 1.2599, and since minor and major thirds are only 6% apart in ratio terms, matching
+#: on raw ratios makes the tuning system decide the chord quality. Sample libraries are
+#: equal-tempered; semitone intervals sidestep the question entirely.
+_CHORD_QUALITIES = {
+    (0, 4, 7): "major", (0, 3, 7): "minor", (0, 3, 6): "dim", (0, 4, 8): "aug",
+    (0, 5, 7): "sus4", (0, 2, 7): "sus2",
+    (0, 4, 7, 11): "maj7", (0, 4, 7, 10): "7", (0, 3, 7, 10): "min7",
+    (0, 3, 6, 10): "min7b5", (0, 4, 7, 9): "6", (0, 3, 7, 9): "min6",
+    (0, 4, 7, 2): "add9", (0, 3, 7, 2): "minadd9",
+}
+
+
+def strong_partials(mono: np.ndarray, peak_idx: int,
+                    sr: int = ANALYSIS_SR) -> list[tuple[float, float]]:
+    """The loudest spectral peaks of the sustain, as (Hz, magnitude).
+
+    Taken past the attack: a transient is broadband and would place a "partial" in
+    every bin.
+    """
+    seg = mono[peak_idx:peak_idx + 32768]
+    if len(seg) < 8192:
+        seg = mono[-32768:] if len(mono) >= 8192 else mono
+    if len(seg) < 4096 or not np.any(seg):
+        return []
+    seg = seg * np.hanning(len(seg))
+    spec = np.abs(np.fft.rfft(seg))
+    freqs = np.fft.rfftfreq(len(seg), 1.0 / sr)
+    band = (freqs > 50.0) & (freqs < 4000.0)
+    spec, freqs = spec[band], freqs[band]
+    if not spec.size or not spec.any():
+        return []
+    floor = _PARTIAL_FLOOR * float(spec.max())
+    inner = spec[1:-1]
+    hits = np.nonzero((inner > floor) & (inner >= spec[:-2]) & (inner > spec[2:]))[0] + 1
+    peaks = [(float(freqs[i]), float(spec[i])) for i in hits]
+    return sorted(peaks, key=lambda p: -p[1])[:_MAX_PARTIALS]
+
+
+def _explained_by(partials, f0: float) -> float:
+    """Share of partial energy sitting on integer multiples of f0."""
+    total = sum(a for _, a in partials) or 1e-12
+    got = 0.0
+    for f, a in partials:
+        k = f / f0
+        if abs(k - round(k)) < _HARMONIC_TOLERANCE and 1 <= round(k) <= 16:
+            got += a
+    return got / total
+
+
+def harmonic_series(partials) -> tuple[float | None, float]:
+    """Best single fundamental for these partials, and how much it explains.
+
+    Halves and thirds of each partial are tried as well as the partial itself, which
+    is what catches a MISSING fundamental — the "Pok F" case, where the note is named
+    F and the energy sits on its harmonics with nothing at F itself.
+    """
+    if len(partials) < 3:
+        return None, 0.0
+    candidates = set()
+    for f, _ in partials:
+        for div in (1, 2, 3, 4):
+            candidates.add(f / div)
+    best, best_score = None, 0.0
+    for f0 in sorted(candidates):
+        if not (_YIN_MIN_HZ <= f0 <= _YIN_MAX_HZ):
+            continue
+        score = _explained_by(partials, f0)
+        # `>=`, not `>`, and the candidates are walked in ASCENDING order — so the
+        # HIGHEST fundamental that explains just as much wins. Every subharmonic of a
+        # true f0 explains exactly the same partials, so strict `>` keeps the lowest
+        # and reintroduces the subharmonic error by another route: it put a C4 note an
+        # octave down at C3 while claiming a perfect fit.
+        if score >= best_score - 1e-9:
+            best, best_score = f0, score
+    return best, best_score
+
+
+def chord_from(partials, root_hz: float) -> tuple[str | None, tuple[int, ...]]:
+    """Chord quality from the partials a single harmonic series does NOT explain.
+
+    Subtracting the root's own harmonics first is what makes this immune to the
+    folding illusion: harmonic 3 of a note is its fifth and harmonic 5 its major
+    third, so a rich single note has the CHROMA of a dominant seventh. Folding only
+    the leftovers means those harmonics can never masquerade as chord tones.
+    """
+    if not root_hz:
+        return None, ()
+    # Walk the partials upward, accepting one as a NEW NOTE only when it is not a
+    # harmonic of a note already accepted. Subtracting only the ROOT's harmonics is
+    # not enough: the third and the fifth bring their own series, and the third's
+    # harmonics land on the major seventh — which read every plain major triad in the
+    # test set as a maj7, and every minor triad as a min7.
+    tones: list[float] = []
+    for f, _ in sorted(partials, key=lambda p: p[0]):
+        if any(abs(f / t - round(f / t)) < _HARMONIC_TOLERANCE and round(f / t) >= 2
+               for t in tones):
+            continue
+        tones.append(f)
+    if len(tones) < 2:
+        return None, ()
+    intervals = {int(round(12 * np.log2(f / root_hz))) % 12 for f in tones}
+    intervals.add(0)
+    found = tuple(sorted(intervals))
+    if found in _CHORD_QUALITIES:
+        return _CHORD_QUALITIES[found], found
+    # Not an exact set: accept the quality whose tones are all present.
+    for tones, name in sorted(_CHORD_QUALITIES.items(), key=lambda kv: -len(kv[0])):
+        wanted = {t % 12 for t in tones}
+        if wanted <= intervals:
+            return name, found
+    return None, found
+
+
+def tonality(mono: np.ndarray, peak_idx: int,
+             sr: int = ANALYSIS_SR) -> dict:
+    """Route a tonal sound: one note, a chord, or inharmonic.
+
+    Replaces a chroma-density gate that MEASURED BACKWARDS — real single notes came
+    out denser than real chords (Cohen d 0.3-0.6, wrong sign), because folding a rich
+    note's harmonics produces exactly a chord's pitch classes. The unfolded spectrum
+    keeps the distinction: a C3 note has partials at 130.8, 261.6, 392.4; a C major
+    triad contains E4 at 329.6, which is a harmonic of nothing in that series.
+    """
+    partials = strong_partials(mono, peak_idx, sr)
+    if len(partials) < 3:
+        return {}
+    f0, fit = harmonic_series(partials)
+    out = {"harmonic_fit": round(float(fit), 3)}
+    if f0 and fit >= _HARMONIC_FIT:
+        out["tonality"] = TONAL_HARMONIC
+        out["harmonic_f0"] = f0
+        return out
+    # The root is the lowest partial that is not itself a harmonic of a lower one.
+    ordered = sorted(partials, key=lambda p: p[0])
+    root = ordered[0][0]
+    quality, _ = chord_from(partials, root)
+    if quality:
+        out.update({"tonality": TONAL_CHORD, "chord_root": root,
+                    "chord_quality": quality})
+    else:
+        # Real partials, no single series, no recognisable chord: FM, bells, metal.
+        # Given neither a note nor a key rather than a low-confidence guess — a
+        # metallic bell answering a search for "C minor stab" makes the system look
+        # broken, and the embeddings already find these by "metallic" or "bell".
+        out["tonality"] = TONAL_INHARMONIC
+    return out
+
+
 def spectral_flatness(mono: np.ndarray) -> float:
     """Geometric over arithmetic mean of the spectrum: ~1 is noise, near 0 is a tone.
 
@@ -708,14 +874,52 @@ def analyze(audio: np.ndarray, sr: int, mono: np.ndarray,
                    "loudness_lufs": loudness_lufs(audio, sr)}
 
     if kind == KIND_ONE_SHOT:
-        # A single fundamental. Meaningless for a chord bed, which is why it is gated.
-        # Gated a second time on NOISINESS: a snare has no fundamental, and YIN will
-        # nevertheless return one — a real snare in this library came back at 25 Hz.
-        # Gemini proposed using the tonal/atonal head as the gatekeeper; flatness is
-        # the same judgement made here, from the spectrum already to hand, without
-        # making measurement wait on a model.
+        # Tonality is judged from the PARTIALS, so it is computed whatever the
+        # noisiness — flatness only ever answered "should we attempt a fundamental",
+        # and using it to gate the whole analysis left real guitar and synth chords
+        # with no tonality at all rather than the wrong one.
+        tonal = tonality(mono, peak_idx)
+        props.update({k: v for k, v in tonal.items() if k != "harmonic_f0"})
+        # A snare has no fundamental, and YIN will return one anyway — a real snare
+        # in this library came back at 25 Hz. Gemini proposed the tonal/atonal head as
+        # gatekeeper; flatness is the same judgement made from the spectrum already to
+        # hand, without waiting on a model.
         if spectral_flatness(mono) <= _PITCH_MAX_FLATNESS:
-            props.update(pitch(mono, peak_idx))
+            # An UNDETERMINED tonality means too few partials to judge — a sine sub, a
+            # simple 808, a filtered tone. That is not a reason to withhold a pitch:
+            # one or two partials cannot be a chord, so the note is the right answer.
+            # Requiring `harmonic` here silently stripped the pitch from every pure
+            # tone in the library.
+            if tonal.get("tonality") in (TONAL_HARMONIC, None):
+                # ONE note: a fundamental is the right answer. YIN gives the precise
+                # frequency; the harmonic fit already agreed there is one series, and
+                # cross-checking the two catches the case where YIN drops an octave.
+                found = pitch(mono, peak_idx)
+                f0 = tonal.get("harmonic_f0")
+                if found and f0:
+                    ratio = found["pitch_hz"] / f0
+                    if abs(ratio - round(ratio)) < 0.05 and round(ratio) != 1:
+                        # YIN and the spectrum disagree by a whole octave or more;
+                        # the series fundamental is the better-evidenced of the two.
+                        found = {"pitch_hz": round(f0, 2),
+                                 "pitch_midi": int(round(69 + 12 * np.log2(f0 / 440.0))),
+                                 "pitch_confidence": round(
+                                     float(found["pitch_confidence"]) * 0.8, 3)}
+                elif not found and f0:
+                    # A MISSING fundamental: nothing periodic for YIN to latch onto,
+                    # but the partials' spacing names the note anyway. This is the
+                    # "Pok F" case — named F, with no energy at F.
+                    found = {"pitch_hz": round(f0, 2),
+                             "pitch_midi": int(round(69 + 12 * np.log2(f0 / 440.0))),
+                             "pitch_confidence": round(float(tonal["harmonic_fit"]) * 0.7, 3)}
+                props.update(found or {})
+        # A CHORD gets a root and a quality instead; an INHARMONIC sound gets neither,
+        # on purpose. Outside the flatness gate: that gate answers "attempt a
+        # fundamental?", and leaving the conversion inside it published the root as a
+        # raw frequency for any percussive chord that failed it.
+        if tonal.get("chord_root"):
+            props["chord_root"] = _NOTE_NAMES[
+                int(round(69 + 12 * np.log2(tonal["chord_root"] / 440.0))) % 12]
     else:
         # A loop gets the question asked the other way round: not "what note", but
         # "what key" — which is what a producer needs before dropping it into a set.
