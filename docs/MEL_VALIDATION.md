@@ -71,6 +71,16 @@ wall of CUDA warnings on import; **nothing is broken**, it probes for a GPU and 
 back to CPU. Installing CUDA would accelerate nothing: Essentia is used only for mel
 algorithms, and the models run through onnxruntime at ~2 ms/patch.
 
+---
+
+# Superseded — the state BEFORE the fix, kept only for the reasoning
+
+⚠️ Everything below describes the broken state and was written while it was still
+broken. **It is history, not status.** The questions it leaves open — "two ways
+forward, undecided" — were answered by the fix above: the recipe was read out of
+Essentia's source, in numpy, with no WSL runtime dependency. Do not act on this
+section; read it only to avoid re-deriving what was already ruled out.
+
 ## What is set up and working
 
 WSL 2 / **Ubuntu 26.04 LTS / Python 3.14**, 6 cores, 15 GB. Essentia installed in a
@@ -151,3 +161,10 @@ Everything in `README.md` about accuracy (82% family / 37% specific) was measure
 the **current, mismatched** spectrograms. Those numbers are honest about what the
 system does today, but they are **not** a measurement of the models' ability. If the
 mel is fixed, re-run `python -m listener.evaluate` before quoting them again.
+
+> **Answered, and the instrument was wrong too.** The mel was fixed and the library
+> re-scanned, so the numbers are no longer measured on bad spectrograms. But
+> `evaluate.py` turned out to be a breakage detector rather than a quality meter — it
+> scored the corrected and the broken spectrogram *identically, to the unit*, across 16
+> categories. Use **`rank_eval.py`** (MRR, hit@1, hit@3) for anything that claims to
+> measure quality. Current: **hit@1 57.2%** after demoting AudioSet's interior nodes.
