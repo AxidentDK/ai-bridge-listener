@@ -122,19 +122,38 @@ Filenames are again the ground truth, and again noisy — but a file called
 
 | | |
 |---|---|
-| Tempo within 2.5 BPM of the stated one (n=546) | **57%** |
+| Tempo within 2.5 BPM of the stated one (n=546) | **69%** |
 | Pitch class matching a note named in the filename (n=3,671) | **74%** |
 
-**Tempo is the weakest measurement, and octave errors are counted as errors.** That is
-deliberate. It is tempting to score 85 BPM as "right" for a 170 BPM loop, which would
-lift the figure to 78% — but they are not the same tempo. The same pulse written at 85
-and at 170 differs in note values, so the grid, the swing and every quantise decision
-differ with it; by that logic an eighth and a sixteenth would be interchangeable.
-Forgiving the octave flatters the number and misleads the caller.
+**Octave errors are counted as errors.** That is deliberate. Scoring 85 BPM as "right"
+for a 170 BPM loop would lift the figure well above this — but they are not the same
+tempo. The same pulse written at 85 and at 170 differs in note values, so the grid, the
+swing and every quantise decision differ with it; by that logic an eighth and a
+sixteenth would be interchangeable. Forgiving the octave flatters the number and
+misleads the caller.
 
-Where the file's LENGTH settles the question it is used: a loop cut to a whole number
-of bars has its tempo fixed by its duration, far more precisely than by its envelope.
-That bar count is stored, so a BPM can be checked rather than taken on trust. Every
-estimate also carries a confidence.
+Tempo is scored on three multiplied terms rather than one: autocorrelation of the onset
+envelope, a perceptual prior around 120 BPM, and how plausible each candidate's implied
+**events per beat** is. That third term is what separates a tempo from its half, and it
+had to be added because *duration cannot* — a file that is 4 bars at 100 BPM is also
+exactly 8 bars at 200. Adding it took accuracy from 57% to 69% and cut clean half-time
+errors from 92 files to 26.
+
+> ⚠️ The events-per-beat anchor (~1.5–2.2, sloping with tempo) is a property of **this
+> onset detector**, not of music. A 16th-note groove has four musical events per beat;
+> the detector counts only what clears 15% of the largest flux rise, so it counts
+> structural impacts and drops ghost notes. Change `_FLUX_MIN_FRACTION` and the anchor
+> must be re-measured.
+
+Where the file's LENGTH settles the question it is used too: a loop cut to a whole
+number of bars has its tempo constrained by its duration. That bar count is stored, so
+a BPM can be checked rather than taken on trust — but note it constrains the tempo only
+to a power-of-two family, and never picks the member.
+
+Every estimate carries a confidence, and it now means something: prominence times the
+margin over the nearest metrical rival. The earlier version measured how *rhythmic* a
+loop was, which is a different question and was anti-correlated with being right — a
+perfectly quantised loop has a perfect half-time alias, so "very rhythmic" scored as
+"very certain" exactly where the tempo was most ambiguous.
 
 Apache-2.0.

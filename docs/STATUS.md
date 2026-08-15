@@ -56,17 +56,33 @@ so a classifier can be trained without decoding the library again.
 
 | | |
 |---|---|
-| Tempo within 2.5 BPM of a filename-stated BPM (n=483) | **64%** |
-| Pitch class matching a note named in the filename (n=3,626) | **75%** |
-| Files with genuinely wide stereo (>0.2) | 8,427 |
-| Files whose mono sum partially cancels (correlation < 0) | 1,346 |
+| Tempo within 2.5 BPM of a filename-stated BPM (n=546) | **69%** (was 57%) |
+| Pitch class matching a note named in the filename (n=3,671) | **74%** |
+| Files with genuinely wide stereo (>0.2) | 8,992 |
+| Files whose mono sum partially cancels (correlation < 0) | 1,490 |
 
-**Tempo is the weakest measurement.** Octave errors are counted as errors here, and
-deliberately: 85 and 170 BPM are *not* the same tempo, because the same pulse written
-at each differs in note values — the grid, the swing and every quantise decision differ
-with it. Kim made that correction; an earlier "86% allowing an octave" figure was
-flattering the result. The bar count is stored as the evidence for a tempo, so the
-claim can be checked rather than taken on trust.
+**Octave errors are counted as errors**, deliberately: 85 and 170 BPM are *not* the same
+tempo, because the same pulse written at each differs in note values — the grid, the
+swing and every quantise decision differ with it. Kim made that correction; an earlier
+"86% allowing an octave" figure was flattering the result.
+
+**Two things about tempo that are easy to get wrong and cost a day between them:**
+
+1. **Bar-fitting does NOT resolve the octave.** 4 bars at 100 BPM is also exactly 8 bars
+   at 200. Duration constrains the tempo to a power-of-two family and then says nothing
+   about which member. It removes the *non*-octave errors, which is a different job.
+2. **Events per beat is what breaks the tie**, and its anchor belongs to the DETECTOR.
+   Measured at the true tempo: median 2.10 events/beat, doubling to 4.19 if read at
+   half-time. Anchor ~1.5 sloping to ~2.2 at slow tempos. ⚠️ A 16th-note groove has four
+   *musical* events per beat — `onset_times` counts only what clears
+   `_FLUX_MIN_FRACTION`, so it counts structural impacts. **Change that threshold and
+   these numbers must be re-measured**, or the calibration silently becomes a
+   coincidence.
+
+Confidence is prominence × margin over the nearest metrical rival. The previous version
+measured how *rhythmic* a loop was and was anti-correlated with correctness (53% right
+above 0.9 confidence, 65% below it), because a perfectly quantised loop has a perfect
+half-time alias.
 
 ## The open thread: Phase A.5, on a branch
 
