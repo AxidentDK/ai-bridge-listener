@@ -34,7 +34,11 @@ import numpy as np
 #:         perceptual prior, events-per-beat likelihood): 57% -> 69% exact, with
 #:         half-time errors down from 92 to 26. Confidence is now prominence times
 #:         metrical margin, which stopped it pointing the wrong way.
-FEATURE_VERSION = "feat3"
+#: feat4 = four bugs Gemini found by reviewing this file: zero-padded FFT for the
+#:         pitch support check (bass notes had no bin within a semitone), decay
+#:         bounded at the next onset, metrical rivals looked up outside the tempo
+#:         search window, and a prior width chosen on the WORST tempo band.
+FEATURE_VERSION = "feat4"
 
 ANALYSIS_SR = 16000          # the mel pass already produced this; reuse it
 
@@ -100,6 +104,9 @@ _YIN_MIN_CONFIDENCE = 0.4
 #: magnitude, or it is not in the sound. Deliberately low — a missing-fundamental
 #: timbre is real and common — but a subsonic subharmonic scores essentially zero.
 _PITCH_SUPPORT = 0.05
+#: FFT length for that support check. Not the analysis window — a zero-padded one, to
+#: get bins fine enough to confirm a bass note. See ``_agree_with_spectrum``.
+_SUPPORT_FFT = 16384
 
 # --- key (ported from the bridge's describe.py) ----------------------------------
 
@@ -285,7 +292,12 @@ def envelope(mono: np.ndarray, onsets: np.ndarray, kind: str,
         # audible click is still a kick that rings.
         return attack_ms, 0.0, peak_idx
 
-    tail = env[peak_idx:]
+    # The tail STOPS at the next onset. A one-shot may legitimately have two onsets —
+    # a flam, a kick with an audible click, a double hit — and measuring decay through
+    # the second one measures the second hit, not the first's ring-out. A double-hit
+    # kick whose first hit decays in ~150 ms was reporting 386 ms, because the
+    # envelope never fell 20 dB before the second impact lifted it again.
+    tail = env[peak_idx:limit] if limit > peak_idx else env[peak_idx:]
     below = np.nonzero(tail <= peak * (10.0 ** (-20.0 / 20.0)))[0]
     if below.size:
         decay_ms = round(float(below[0]) * 3.0 * 1000.0 / sr, 1)
@@ -399,8 +411,18 @@ def _agree_with_spectrum(x: np.ndarray, sr: int, hz: float,
     named note itself — and its confidence is cut, because an estimate that had to be
     overruled is a weaker claim than one the two methods agreed on.
     """
-    spec = np.abs(np.fft.rfft(x * np.hanning(len(x))))
-    freqs = np.fft.rfftfreq(len(x), 1.0 / sr)
+    # ZERO-PADDED, and it matters down low. A 2048-point FFT at 16 kHz has 7.81 Hz
+    # bins, so for four of the 36 notes between C0 and B2 — 34.65, 36.71, 43.65 and
+    # 58.27 Hz among them — NO bin falls within a semitone of the note. The support
+    # check would then reject a perfectly good YIN estimate and fall back to the
+    # nearest strong bin, which is exactly the 808 and sub-bass material the two
+    # guards above exist to get right. Padding to 16384 gives 0.98 Hz bins and costs
+    # microseconds.
+    padded = np.zeros(_SUPPORT_FFT, dtype=np.float64)
+    window = x * np.hanning(len(x))
+    padded[:min(len(window), _SUPPORT_FFT)] = window[:_SUPPORT_FFT]
+    spec = np.abs(np.fft.rfft(padded))
+    freqs = np.fft.rfftfreq(_SUPPORT_FFT, 1.0 / sr)
     usable = (freqs >= _YIN_MIN_HZ) & (freqs <= _YIN_MAX_HZ)
     if not usable.any() or not spec[usable].any():
         return None, confidence
@@ -481,7 +503,21 @@ _BPM_MIN, _BPM_MAX, _BPM_PRIOR = 60.0, 190.0, 120.0
 #: having no prior at all: one sigma of a whole octave tells the search that a tempo
 #: and its double are near enough equally fine, which is precisely the tie it exists
 #: to break. Half-time was the single largest error class — 92 of 236 wrong tempos.
-_BPM_PRIOR_WIDTH = 0.3
+#:
+#: ⚠️ THIS IS A BLUNT INSTRUMENT AND THE WIDTH IS A COMPROMISE, not an optimum. A
+#: prior centred on 120 BPM inevitably favours material near 120: swept per tempo
+#: band, 0.30 scores 53/83/47 (slow/mid/fast) and 0.80 scores 54/66/53 — tightening it
+#: buys mid-tempo accuracy by taking it from drum-and-bass and trap, and loosening it
+#: does the reverse. No value is good everywhere, because the prior is *assuming* an
+#: answer rather than measuring one.
+#:
+#: 0.45 is chosen on the WORST BAND rather than the mean: it scores 54/81/50 for the
+#: same 69% overall as 0.30, so it dominates it. Judging on the average is what let a
+#: 36% collapse on fast material hide behind a headline that barely moved — Gemini
+#: predicted that collapse from these multipliers alone, before it was measured.
+#: The real fix is for the events-per-beat term to carry the octave decision so the
+#: prior can be flattened; it is not strong enough to do that alone yet.
+_BPM_PRIOR_WIDTH = 0.45
 
 #: EVENTS PER BEAT — the term that actually separates a tempo from its half, since
 #: duration cannot: a file that is 4 bars at 100 BPM is also exactly 8 bars at 200.
@@ -671,8 +707,26 @@ def tempo(onsets: np.ndarray, flux: np.ndarray | None = None,
                     # near zero. What a caller needs to know is how sure the system is
                     # GIVEN everything it knows, and if the prior legitimately rules a
                     # rival out then the answer really is more certain.
+                    # Score a WIDER lag range than the tempo search itself, purely so
+                    # the rivals can be looked up. The search is bounded to 60-190 BPM,
+                    # but a rival at half or double the winner routinely falls outside
+                    # that: at 100 BPM the winner sits at lag 38 and its half-time
+                    # rival at 76, past the window's end of 62. Those rivals were being
+                    # read as zero, making the margin a perfect 1.0 and the confidence
+                    # highest exactly where the ambiguity was worst — for every tempo
+                    # below about 120 BPM, which is most of a sample library.
+                    wide_lo = max(2, lo // 3)
+                    wide_hi = min(len(acf) - 2, hi * 3)
+                    wide_lags = np.arange(wide_lo, wide_hi + 1)
+                    wide_bpms = 60.0 * frames_per_sec / wide_lags
+                    wide_harmonic = np.zeros(len(wide_lags))
+                    for k, weight in ((1, 1.0), (2, 0.5), (3, 0.33), (4, 0.25)):
+                        idx = wide_lags * k
+                        valid = idx < len(acf)
+                        wide_harmonic[valid] += weight * acf[idx[valid]]
                     posterior = np.zeros(len(acf))
-                    posterior[lags] = scored
+                    posterior[wide_lags] = wide_harmonic * _density_likelihood(
+                        wide_bpms, len(onsets), duration)
                     confidence = prominence * _metrical_margin(posterior,
                                                                int(lags[best]))
                     if bars:

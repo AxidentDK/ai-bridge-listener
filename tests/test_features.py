@@ -90,6 +90,52 @@ def test_pitch_is_refused_when_the_spectrum_has_nothing_there():
             f"reported {got['pitch_hz']} Hz, which carries no energy")
 
 
+def test_bass_notes_survive_the_spectral_support_check():
+    """The support check runs on a ZERO-PADDED FFT, and down low it has to.
+
+    At the 2048-sample analysis window, bins are 7.81 Hz apart, so for four of the 36
+    notes between C0 and B2 — 34.65, 36.71, 43.65 and 58.27 Hz — no bin lands within a
+    semitone. Their correct YIN estimates were being rejected for lack of "support"
+    and replaced by the nearest bin: precisely the 808 and sub-bass material the pitch
+    guards exist to serve.
+    """
+    wrong = []
+    for midi in range(24, 60):
+        hz = 440 * 2 ** ((midi - 69) / 12)
+        got = F.pitch(_tone(hz, seconds=0.6, decay=2.0, harmonic=0.4), 0)
+        if got.get("pitch_midi") != midi:
+            wrong.append((midi, round(hz, 2), got.get("pitch_hz")))
+    assert not wrong, f"bass notes misread: {wrong[:5]}"
+
+
+def test_decay_stops_at_the_next_onset():
+    """A one-shot may have two onsets — a flam, a click, a double hit. Measuring the
+    ring-out THROUGH the second one measures the second hit. An 808 still ringing when
+    the next hit lands reported 5,625 ms of decay instead of a few hundred."""
+    sr = SR
+    t = np.arange(int(2.0 * sr)) / sr
+    ring = (np.sin(2 * np.pi * 50 * t) * np.exp(-t * 1.2)).astype(np.float32)
+    sig = ring.copy()
+    start = int(0.3 * sr)
+    sig[start:] += ring[:len(ring) - start] * 0.9
+    onsets = F.onset_times(sig)
+    assert len(onsets) >= 2, onsets
+    _, decay, _ = F.envelope(sig, onsets, F.classify(onsets, 2.0))
+    assert decay < 600, f"decay leaked past the second onset: {decay} ms"
+
+
+def test_metrical_rivals_are_visible_outside_the_tempo_search_window():
+    """The search covers 60-190 BPM, but a winner's half-time rival routinely sits
+    outside it: at 100 BPM the winner is lag 38 and the rival lag 76. Those were read
+    as zero, so the margin came out a perfect 1.0 and confidence was HIGHEST for every
+    tempo under ~120 BPM — most of a sample library — exactly where the octave
+    ambiguity is worst."""
+    acf = np.zeros(300)
+    acf[38] = 1.0
+    acf[76] = 0.95                       # a strong half-time rival, outside 60-190 BPM
+    assert F._metrical_margin(acf, 38) < 0.1, "a rival outside the window must count"
+
+
 def test_noise_gets_no_pitch():
     """A hi-hat has no fundamental. An estimator asked anyway still returns a number,
     so the flatness gate has to refuse the question."""
