@@ -22,6 +22,7 @@ tf2onnx cannot even import without it.
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -162,17 +163,36 @@ def load_head(name: str, models: Path = MODELS) -> Head:
                 W2=w["dense_1/kernel"], b2=w["dense_1/bias"])
 
 
-def load_all(models: Path = MODELS, only: list[str] | None = None) -> dict[str, Head]:
-    """Every head that loads. A head that will not load is skipped, not fatal."""
+def load_all(models: Path = MODELS, only: list[str] | None = None,
+             report: bool = True) -> dict[str, Head]:
+    """Every head that loads. A head that will not load is skipped, not fatal.
+
+    Skipping is right — one unreadable head must not stop a 30,000-file scan — but it
+    used to be SILENT, and that is the dangerous half. A classification head that
+    failed to load would simply produce no tags in its namespace, and the only symptom
+    is a producer searching for a style and being told their library does not contain
+    it. Failures are now named on stderr.
+
+    Two heads in the current model set legitimately fail (`approachability_regression`
+    and `engagement_regression`: no `dense_1/bias`, being regressions rather than
+    classifiers) and cost nothing, since ``tags_for`` returns nothing for a regression
+    anyway. That is exactly why the message matters — without it there is no way to
+    tell those apart from a head that should have worked.
+    """
     heads: dict[str, Head] = {}
+    skipped: list[str] = []
     for pb in sorted(models.glob(f"*{SUFFIX}.pb")):
         name = pb.name[:-len(f"{SUFFIX}.pb")]
         if name == BUILTIN_400 or (only and name not in only):
             continue
         try:
             heads[name] = load_head(name, models)
-        except Exception:                                        # noqa: BLE001, S112
-            continue
+        except Exception as exc:                                 # noqa: BLE001
+            skipped.append(f"{name} ({type(exc).__name__}: {exc})")
+    if skipped and report:
+        print(f"  {len(heads)} heads loaded; {len(skipped)} skipped:", file=sys.stderr)
+        for line in skipped:
+            print(f"    - {line}", file=sys.stderr)
     return heads
 
 
@@ -188,10 +208,20 @@ def builtin_400_classes(models: Path = MODELS) -> list[str]:
 def tags_for(head: Head, embedding: np.ndarray, *, top_k: int = 5,
              floor: float = 0.15) -> list[tuple[str, float]]:
     """(label, score) pairs worth recording. Regression heads return [] — their
-    single value belongs in `properties`, not in a tag table."""
+    single value belongs in `properties`, not in a tag table.
+
+    ``embedding`` may be one vector or a stack of per-patch vectors. Given a stack,
+    the head runs on EACH patch and the PREDICTIONS are averaged — which is not the
+    same as averaging the embeddings first, because a relu-then-softmax head is
+    non-linear and does not commute with a mean. Averaging inputs describes a
+    half-drone, half-techno file as the point between them, which may be neither.
+    """
     if head.is_regression:
         return []
-    probs = head.predict(embedding)
+    if embedding.ndim > 1:
+        probs = np.mean([head.predict(vec) for vec in embedding], axis=0)
+    else:
+        probs = head.predict(embedding)
     if head.activation == "Softmax":
         # Mutually exclusive: only the winner is a claim about the sound.
         i = int(np.argmax(probs))

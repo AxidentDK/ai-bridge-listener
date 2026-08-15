@@ -88,23 +88,36 @@ class Tagger:
         # anything. Resumability worked; the version was an incomplete description of
         # the analysis.
         self.version = (f"{decode.MEL_VERSION}+{decode.features.FEATURE_VERSION}"
-                        f"+discogs-effnet-1+{len(self.heads)}heads-1"
+                        f"+discogs-effnet-1+{len(self.heads)}heads-2"
                         + (f"+yamnet-1(k{EVENT_TOP_K},f{EVENT_FLOOR})"
                            if self.yamnet else ""))
 
     def embed(self, patches: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """[n, 128, 96] -> (embedding[1280], style_activations[400]).
+        """[n, 128, 96] -> (embeddings[n, 1280], mean style_activations[400]).
 
-        Averaged over patches: these heads describe a FILE, not an instant. The 400-d
-        activations come free from the same forward pass — that output IS the
-        Discogs400 style classifier, so its separate head is never loaded.
+        Embeddings are returned PER PATCH, not averaged. A head is
+        ``relu(x @ W1 + b1)`` then a softmax or sigmoid, and a non-linearity does not
+        commute with a mean: ``f(mean(x))`` is not ``mean(f(x))``. Averaging first
+        collapses a file into a single point in embedding space, so a track that is
+        half drone and half techno is described as whatever sits between them —
+        possibly neither. Essentia's own pipeline applies the head per patch and
+        averages the PREDICTIONS, and so does ``tag`` now.
+
+        Measured before changing it, on 25 multi-patch files: 2.1% of head verdicts
+        change their top label, with per-class probability shifts of 0.01 median but
+        up to 0.58. Small, real, and free to fix while a re-scan is happening anyway.
+
+        The 400-d activations come free from the same forward pass — that output IS
+        the Discogs400 style classifier — and they are already PREDICTIONS, so
+        averaging them across patches is the correct operation rather than the
+        mistaken one.
         """
         embs, acts = [], []
         for i in range(0, len(patches), BATCH_PATCHES):
             res = self.session.run(None, {self.input_name: patches[i:i + BATCH_PATCHES]})
             acts.append(res[0])                      # activations [n, 400]
             embs.append(res[1])                      # embeddings  [n, 1280]
-        return (np.concatenate(embs, axis=0).mean(axis=0),
+        return (np.concatenate(embs, axis=0),
                 np.concatenate(acts, axis=0).mean(axis=0))
 
     def tag_events(self, patches: np.ndarray, top_k: int = EVENT_TOP_K,
@@ -143,10 +156,13 @@ class Tagger:
         embedding = None
         eff = patches.get("effnet") if isinstance(patches, dict) else patches
         if eff is not None and len(eff):
-            emb, style = self.embed(eff)
-            embedding = emb
+            per_patch, style = self.embed(eff)
+            # The MEAN embedding is what gets stored, because that is what a classifier
+            # trained on it will consume, and one vector per file is the point. The
+            # heads, though, see every patch: predictions are averaged, not inputs.
+            embedding = per_patch.mean(axis=0)
             for name, head in self.heads.items():
-                for label, score in self._tags_for(head, emb):
+                for label, score in self._tags_for(head, per_patch):
                     out.append((name, label, score, self.version))
             if self.style_classes and len(style) == len(self.style_classes):
                 order = np.argsort(style)[::-1][:style_top_k]
