@@ -26,7 +26,8 @@ case "${1:-}" in
     bisect)   SCRIPT="$HERE/bisect_mel_wsl.py" ;;
     fit)      SCRIPT="$HERE/fit_log_wsl.py" ;;
     diagnose) SCRIPT="$HERE/diagnose_mel_wsl.py" ;;
-    *) echo "usage: $0 {validate|bisect|fit|diagnose} <args...>"; exit 2 ;;
+    ab)       SCRIPT="$HERE/ab_mel_test.py" ;;
+    *) echo "usage: $0 {validate|bisect|fit|diagnose|ab} <args...>"; exit 2 ;;
 esac
 shift
 

@@ -1,9 +1,75 @@
-# Mel validation against Essentia — RESUME POINT (2026-08-15)
+# Mel validation against Essentia — RESOLVED (2026-08-15)
 
-**Result: MISMATCH. Our spectrograms are not the ones the models were trained on.**
+**Status: FIXED and verified. Our spectrograms now match Essentia's.**
 
-This is the most consequential finding the project has produced, and it is only
-half-explored. Read this before touching the mel code.
+Downstream proof, which matters more than any correlation: 640 files, 16 categories,
+same models and heads, only the spectrogram differing —
+
+    before   ours 28% / 67%     essentia 29% / 70%
+    after    ours 29% / 70%     essentia 29% / 70%      IDENTICAL, every category
+
+Not a wiring artefact: the same harness separated the two arms before the fix.
+
+## The five bugs
+
+Every one changed values while leaving shapes correct, so nothing ever raised.
+
+| model | wrong | right |
+|---|---|---|
+| MusiCNN | magnitude spectrum | **power** (`type` defaults to power; never overridden) |
+| YAMNet | 400-point FFT (201 bins) | **512, frame zero-padded right** (257 bins) |
+| YAMNet | Slaney mel | **htkMel** `2595·log10(hz/700+1)` |
+| YAMNet | slopes linear in Hz | **slopes linear in mel** (`weighting="warping"`) |
+| YAMNet | `ln(x + 0.001)` | **`ln(x + 0.01)`** |
+
+Correlation went 0.876–0.935 → 0.996–0.998 (MusiCNN) and 0.739–0.981 → 0.9989–0.9991
+(YAMNet); median ratio 26…2025 → 0.9990 and 1.5 → 1.0028.
+
+**Read the source, don't infer the recipe.** An afternoon went into fitting candidate
+logs and inverting ratios against the algorithm's *output*. The answer was in
+`src/algorithms/spectral/tensorflowinput{musicnn,vggish}.cpp` — hardcoded, commented,
+and unambiguous. The parameters are also NOT in `machinelearning/`, which only holds
+the `TensorflowPredict*` wrappers.
+
+## Confirmed irrelevant — do not re-chase
+
+* **zeroPhase** rotates the frame before the FFT. Magnitude spectra are unchanged.
+* **shift order** is scale-then-shift, `10000·x + 1` — already what we computed.
+* **float32 edge accumulation** matches the source but changed nothing measurable.
+
+## A trap we happen to dodge
+
+Essentia binds `weighting="slaneyMel"` to `hz2mel` (`1127.01048·ln(1+f/700)`), **not**
+`hz2melSlaney`. Its "Slaney" weighting is not Slaney's formula. MusiCNN uses
+`"linear"` and VGGish `"warping"`, so neither config touches that branch — but a
+future config might.
+
+## What this did and did not buy
+
+**+1 point specific, +3 family.** Small, and forecast before the work: the A/B was
+run deliberately *first*, so the payoff was known before it was paid for. The value is
+not the point gained — it is that the tags are now provably the ones the models were
+trained to receive, so every future measurement means something.
+
+## Tools (run inside WSL)
+
+    tools/run_in_wsl.sh        wrapper; silences TensorFlow's CUDA noise
+    tools/validate_mel_wsl.py  ours vs Essentia
+    tools/ab_mel_test.py       tag the same files both ways — the decisive test
+    tools/sweep_melbands_wsl.py  parameter sweep via a monotonicity test
+    tools/bisect_mel_wsl.py / fit_log_wsl.py / diagnose_mel_wsl.py
+
+`sweep_melbands_wsl.py` is worth keeping in mind for future parameter questions: a log
+is monotonic, so Spearman rank correlation against the reference isolates the
+FILTERBANK question from the COMPRESSION question instead of confounding them.
+
+## Setup
+
+WSL 2 / Ubuntu 26.04 / Python 3.14. Essentia in a venv at `~/essentia-venv`
+(`essentia-tensorflow`, cp314 wheel — nothing built from source). TensorFlow logs a
+wall of CUDA warnings on import; **nothing is broken**, it probes for a GPU and falls
+back to CPU. Installing CUDA would accelerate nothing: Essentia is used only for mel
+algorithms, and the models run through onnxruntime at ~2 ms/patch.
 
 ## What is set up and working
 

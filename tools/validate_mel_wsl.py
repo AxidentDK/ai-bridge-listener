@@ -73,8 +73,14 @@ def compare(name: str, ours: np.ndarray, theirs: np.ndarray) -> None:
     print(f"     max |diff|    {np.abs(diff).max():.4f}   ({100 * np.abs(diff).max() / scale:.2f}% of peak)")
     print(f"     mean diff     {bias:+.4f}   sd {spread:.4f}"
           f"   {'<-- SYSTEMATIC BIAS' if abs(bias) > 2 * spread and abs(bias) > 1e-3 else ''}")
-    print(f"     median ratio  {np.nanmedian(ratio):.4f}"
-          f"   {'<-- SCALE FACTOR' if abs(np.nanmedian(ratio) - 1) > 0.02 else ''}")
+    # Ratio only over values that are actually large enough for a ratio to mean
+    # anything. Computed over everything it is dominated by near-zero bands, where a
+    # negligible absolute difference gives a wild ratio — which had this flag
+    # shouting SCALE FACTOR at data whose mean difference was -0.0003.
+    big = np.abs(b) > 0.05 * np.abs(b).max()
+    med_ratio = float(np.nanmedian(ratio[big])) if big.any() else float("nan")
+    print(f"     median ratio  {med_ratio:.4f}  (over the {big.sum()} values above 5% "
+          f"of peak)   {'<-- SCALE FACTOR' if abs(med_ratio - 1) > 0.02 else ''}")
     verdict = ("MATCH" if corr > 0.999 and abs(bias) < 0.05
                else "CLOSE" if corr > 0.99
                else "MISMATCH — the tags rest on this")
