@@ -30,7 +30,11 @@ import numpy as np
 #: string for the same reason ``MEL_VERSION`` does — see the warning in ``decode``.
 #: feat2 = pitch estimates must have spectral support (subsonic subharmonics were
 #:         being reported with 0.7-0.8 confidence); bar count stored with tempo.
-FEATURE_VERSION = "feat2"
+#: feat3 = tempo scored on three multiplied terms (autocorrelation, a NARROWED
+#:         perceptual prior, events-per-beat likelihood): 57% -> 69% exact, with
+#:         half-time errors down from 92 to 26. Confidence is now prominence times
+#:         metrical margin, which stopped it pointing the wrong way.
+FEATURE_VERSION = "feat3"
 
 ANALYSIS_SR = 16000          # the mel pass already produced this; reuse it
 
@@ -472,7 +476,35 @@ def chroma_of(mono: np.ndarray, sr: int = ANALYSIS_SR) -> list[float]:
 #: Tempo search range, and the prior it is weighted toward. Autocorrelation is
 #: genuinely ambiguous between a pulse and its double or half, so SOMETHING has to
 #: break the tie; a log-normal prior around 120 BPM is the standard choice.
-_BPM_MIN, _BPM_MAX, _BPM_PRIOR, _BPM_PRIOR_WIDTH = 60.0, 190.0, 120.0, 1.0
+_BPM_MIN, _BPM_MAX, _BPM_PRIOR = 60.0, 190.0, 120.0
+#: Standard deviation of that prior, in OCTAVES. It was 1.0, which is the same as
+#: having no prior at all: one sigma of a whole octave tells the search that a tempo
+#: and its double are near enough equally fine, which is precisely the tie it exists
+#: to break. Half-time was the single largest error class — 92 of 236 wrong tempos.
+_BPM_PRIOR_WIDTH = 0.3
+
+#: EVENTS PER BEAT — the term that actually separates a tempo from its half, since
+#: duration cannot: a file that is 4 bars at 100 BPM is also exactly 8 bars at 200.
+#:
+#: Measured over 546 loops whose filenames state their tempo: at the TRUE tempo the
+#: median is 2.10 events per beat (p25 1.50, p75 2.67); read at half-time it doubles
+#: to 4.19. Sweeping the anchor, 1.5 picked the true tempo over its half on 88% of
+#: them, against 78% at 2.0 and 49% at 3.0.
+#:
+#: ⚠️ THIS ANCHOR BELONGS TO THE DETECTOR, NOT TO MUSIC. A 16th-note groove has four
+#: musical events per beat; `onset_times` counts only what clears `_FLUX_MIN_FRACTION`
+#: of the largest rise, so it counts STRUCTURAL impacts — kicks, main snares, stabs —
+#: and drops ghost notes, quiet hats and delay tails. Change that threshold or the
+#: onset function and these numbers must be re-measured, or they will quietly mislead.
+#:
+#: The target SLOPES with tempo rather than being fixed. Fast music leans on half-time
+#: phrasing (the snare on 3, not on 2 and 4), so it carries FEWER structural events per
+#: beat than slow music, not more — visible in the same data: files named 140+ BPM
+#: average 4.25 onsets/s (1.6 per beat) against 3.20 (2.3 per beat) for those named
+#: under 100.
+_EPB_AT_SLOW, _EPB_AT_FAST = 2.2, 1.5      # anchors at 85 and 170 BPM
+_EPB_SLOW_BPM, _EPB_FAST_BPM = 85.0, 170.0
+_EPB_WIDTH = 0.9                            # sigma in octaves; deliberately generous
 
 
 #: Bar counts a sample-library loop is actually cut to. Powers of two, because that is
@@ -482,6 +514,47 @@ _BAR_CANDIDATES = (1, 2, 4, 8, 16, 32)
 #: snapped to it — a factor of 1.5 in either direction. Wide on purpose: the errors
 #: this corrects are metrical (3/4, 4/3, 2/3 of the beat), not small.
 _SNAP_MAX_LOG2 = 0.6
+
+
+def _epb_target(bpm):
+    """Expected structural events per beat at a given tempo — a sloped line."""
+    frac = ((np.log2(np.asarray(bpm, dtype=float)) - np.log2(_EPB_SLOW_BPM))
+            / (np.log2(_EPB_FAST_BPM) - np.log2(_EPB_SLOW_BPM)))
+    return _EPB_AT_SLOW + frac * (_EPB_AT_FAST - _EPB_AT_SLOW)
+
+
+def _density_likelihood(bpms: np.ndarray, n_onsets: int,
+                        duration: float | None) -> np.ndarray:
+    """How plausible each candidate tempo's implied subdivision density is."""
+    if not duration or duration <= 0 or n_onsets < 2:
+        return np.ones(len(bpms))
+    beats = duration * np.asarray(bpms, dtype=float) / 60.0
+    epb = n_onsets / np.maximum(beats, 1e-9)
+    return np.exp(-0.5 * (np.log2(epb / _epb_target(bpms)) / _EPB_WIDTH) ** 2)
+
+
+def _metrical_margin(acf: np.ndarray, lag: int) -> float:
+    """1 - (strongest metrical rival / winner), over the half, double, third and 3/2.
+
+    The confidence this replaces measured how PERIODIC a loop is, which is not the
+    same question and turned out to be anti-correlated with being right: 53% accurate
+    above 0.9 confidence against 65% below it. A perfectly quantised loop has a
+    perfect half-time alias, so "very rhythmic" was being scored as "very certain"
+    exactly where the tempo was most ambiguous.
+    """
+    if not 0 < lag < len(acf):
+        return 0.0
+    winner = float(acf[lag])
+    if winner <= 1e-12:
+        return 0.0
+    rivals = []
+    for factor in (0.5, 2.0, 1.0 / 3.0, 3.0, 1.5, 2.0 / 3.0):
+        rival = int(round(lag * factor))
+        if 0 < rival < len(acf) and abs(rival - lag) > 1:
+            rivals.append(float(acf[rival]))
+    if not rivals:
+        return 1.0
+    return float(np.clip(1.0 - max(rivals) / winner, 0.0, 1.0))
 
 
 def _snap_to_whole_bars(bpm: float, duration: float | None) -> tuple[float, int | None]:
@@ -563,7 +636,13 @@ def tempo(onsets: np.ndarray, flux: np.ndarray | None = None,
                     idx = lags * k
                     valid = idx < len(acf)
                     harmonic[valid] += weight * acf[idx[valid]]
-                scored = harmonic * prior
+                # Three multiplied terms, not one deciding: how periodic the envelope
+                # is, whether the tempo is one a human would tap, and whether the
+                # implied subdivision density is plausible. A SOFT weight on purpose —
+                # as a hard gate, one missed kick would punt a file into the wrong
+                # octave over an otherwise flawless autocorrelation peak.
+                scored = harmonic * prior * _density_likelihood(bpms, len(onsets),
+                                                                duration)
                 best = int(np.argmax(scored))
                 lag = lags[best]
                 # Sub-frame refinement, same reason as everywhere else here: the lag
@@ -576,14 +655,26 @@ def tempo(onsets: np.ndarray, flux: np.ndarray | None = None,
                 bpm = 60.0 * frames_per_sec / float(lag)
                 bpm, bars = _snap_to_whole_bars(bpm, duration)
                 if _BPM_MIN <= bpm <= _BPM_MAX:
-                    # Confidence is how much the winning lag stands out from the
-                    # search band, not the raw correlation — a slowly decaying
-                    # envelope correlates highly with itself at every lag.
+                    # Confidence needs BOTH a strong pulse and an absence of metrical
+                    # ambiguity, so the two are multiplied. Prominence alone answered
+                    # "how rhythmic is this", which is why it pointed the wrong way.
                     band = acf[lo:hi + 1]
                     peak = float(band[best])
                     spread = float(band.std()) or 1e-9
                     clarity = (peak - float(band.mean())) / spread
-                    confidence = min(1.0, max(0.0, clarity / 3.0))
+                    prominence = min(1.0, max(0.0, clarity / 3.0))
+                    # Measured on the SCORED candidates, not the raw autocorrelation.
+                    # The raw version was the honest-looking choice — evidence only,
+                    # no prior double-counted — and it produced a confidence that was
+                    # merely flat instead of inverted: a clean loop has a genuinely
+                    # strong half-time alias in the ACF, so almost everything scored
+                    # near zero. What a caller needs to know is how sure the system is
+                    # GIVEN everything it knows, and if the prior legitimately rules a
+                    # rival out then the answer really is more certain.
+                    posterior = np.zeros(len(acf))
+                    posterior[lags] = scored
+                    confidence = prominence * _metrical_margin(posterior,
+                                                               int(lags[best]))
                     if bars:
                         # Two independent lines of evidence agreeing — the envelope's
                         # own periodicity and the file's length — is worth more than
