@@ -37,14 +37,18 @@ except ImportError:
     sys.exit("essentia not importable — see the header for the venv setup.")
 
 
-def essentia_mel(path: str, algorithm: str) -> np.ndarray:
-    """Essentia's own patch stack: [n_patches, frames, bands]."""
-    loader = es.MonoLoader(filename=path, sampleRate=16000, resampleQuality=4)
-    audio = loader()
+def essentia_mel(path: str, algorithm: str, cfg: decode.MelConfig) -> np.ndarray:
+    """Essentia's own frames: [n_frames, bands].
+
+    The frame size MUST come from the config being tested. Feeding VGGish (400/160)
+    frames sized for MusiCNN (512/256) produces a mismatch that looks like our code is
+    wrong when it is the harness that is wrong — the exact way a validation tool
+    manufactures a false negative and sends you off rewriting correct code.
+    """
+    audio = es.MonoLoader(filename=path, sampleRate=16000, resampleQuality=4)()
     frames = getattr(es, algorithm)()
     out = [frames(f) for f in es.FrameGenerator(
-        audio, frameSize=decode.EFFNET.frame_size,
-        hopSize=decode.EFFNET.hop_size, startFromZero=True)]
+        audio, frameSize=cfg.frame_size, hopSize=cfg.hop_size, startFromZero=True)]
     return np.array(out, dtype=np.float32)
 
 
@@ -93,16 +97,22 @@ def main(argv: list[str]) -> int:
             print(f"  could not read: {exc}")
             continue
 
-        if "TensorflowInputMusiCNN" in algos:
-            ours = decode.melspectrogram(audio, decode.EFFNET)
+        for algo, cfg, label in (
+                ("TensorflowInputMusiCNN", decode.EFFNET,
+                 "EffNet / MusiCNN input (96 bands)"),
+                ("TensorflowInputVGGish", decode.YAMNET,
+                 "YAMNet / VGGish input (64 bands)")):
+            if algo not in algos:
+                continue
+            ours = decode.melspectrogram(audio, cfg)
             ours_flat = ours.reshape(-1, ours.shape[-1]) if ours.size else ours
-            compare("EffNet / MusiCNN input (96 bands)", ours_flat,
-                    essentia_mel(path, "TensorflowInputMusiCNN"))
-        if "TensorflowInputVGGish" in algos:
-            ours = decode.melspectrogram(audio, decode.YAMNET)
-            ours_flat = ours.reshape(-1, ours.shape[-1]) if ours.size else ours
-            compare("YAMNet / VGGish input (64 bands)", ours_flat,
-                    essentia_mel(path, "TensorflowInputVGGish"))
+            theirs = essentia_mel(path, algo, cfg)
+            if ours_flat.shape[-1] != theirs.shape[-1]:
+                print(f"  {label}: BAND COUNT DIFFERS — ours {ours_flat.shape[-1]}, "
+                      f"essentia {theirs.shape[-1]}. Compare aborted; a per-value "
+                      f"diff would be meaningless.")
+                continue
+            compare(label, ours_flat, theirs)
     return 0
 
 
