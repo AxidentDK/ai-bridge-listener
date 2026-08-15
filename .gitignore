@@ -28,3 +28,6 @@ Thumbs.db
 CLAUDE.md
 AGENTS.md
 .claude/
+
+# Personal terms for scripts/check_private.py — local only.
+.private-terms
