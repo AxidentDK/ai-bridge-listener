@@ -2,78 +2,114 @@
 
 **Purpose of this file:** the other docs record *findings* — what was learned, what was
 fixed, what not to re-chase. None of them recorded **how a session ended**, so the next
-session had to reconstruct it from git log and a database. That is the gap this file
-exists to close. **Update it at the end of a session, even when everything is green** —
-"nothing is blocked" is itself the thing worth writing down.
+session had to reconstruct it from git log, a SQLite file, and eventually the raw
+transcript. That is the gap this file closes. **Update it at the end of a session, even
+when everything is green** — "nothing is blocked" is itself worth writing down.
 
-Last updated: **2026-08-15**.
+Last updated: **2026-08-15** (late).
 
 ---
 
 ## State
 
-Both repos clean, everything committed and pushed. Nothing is blocked.
+| | |
+|---|---|
+| `ai-bridge-for-ableton-live` | 60 tools, **103 tests passing**, schema v3 |
+| `ai-bridge-listener` | **17 tests passing**, analyzer `mel2+feat2+…` |
+| spectrograms | verified against Essentia's own — `MEL_VALIDATION.md` |
+| tag quality | hit@1 **57.2%** after demoting AudioSet's interior nodes |
+
+## ⚠️ How to run a FULL scan — this cost real time to rediscover
+
+Live's own index is **not** the whole library. It listed 5,954 files where the original
+scan had 22,100, and a re-scan from it silently produced a much smaller index. The
+folder roots have to be passed explicitly:
+
+```
+python -m listener \
+  --folder "C:/ProgramData/Arturia" \
+  --folder "C:/ProgramData/Akai" \
+  --folder "C:/ProgramData/Ableton" \
+  --folder "<user home>/Documents" \
+  --folder "<sample drive>/..."          # every pack root, one --folder each
+```
+
+Plug in whichever roots hold the packs — plugin factory content under `ProgramData`,
+the user's own `Documents`, and any sample drive. The point is that **they must be
+listed**; Live's index will not supply them.
+
+Run it from the project's virtualenv (`.ai-bridge/venv` under the user home) —
+`onnxruntime` is not in the system Python. Roughly 11 files/s with measurement, so
+~45 minutes for a library this size.
+It is resumable: files whose size, mtime and **analyzer version** are unchanged are
+skipped, so an interrupted scan can simply be re-run.
+
+## Phase A — measured features, DONE and validated
+
+`properties` shipped in schema v1 and had **zero rows**. It now carries, per file:
+kind (one-shot/loop by onset density), onsets, bpm + confidence + **bars**, key/scale/
+strength for loops, pitch as Hz/MIDI/confidence for one-shots, attack, T60 decay,
+stereo width and correlation, and BS.1770-4 loudness. Embeddings are stored as float16
+so a classifier can be trained without decoding the library again.
+
+**Validated against filenames, on 28,350 files indexed:**
 
 | | |
 |---|---|
-| `ai-bridge-for-ableton-live` | 60 tools, **103 tests passing** |
-| `ai-bridge-listener` | index built: **22,100 files / 2.88 M tags**, analyzer `mel2+discogs-effnet-1+25heads-1+yamnet-1(k15,f0.02)` |
-| spectrograms | **verified against Essentia's own** — see `MEL_VALIDATION.md` |
-| identification quality | **hit@1 57.2%**, hit@3 ~85% (after demoting AudioSet's interior nodes) |
+| Tempo within 2.5 BPM of a filename-stated BPM (n=483) | **64%** |
+| Pitch class matching a note named in the filename (n=3,626) | **75%** |
+| Files with genuinely wide stereo (>0.2) | 8,427 |
+| Files whose mono sum partially cancels (correlation < 0) | 1,346 |
 
-The whole library has already been re-scanned on the corrected mel. `live_sidecar_status`
-and `live_find_sound` work end to end through MCP.
+**Tempo is the weakest measurement.** Octave errors are counted as errors here, and
+deliberately: 85 and 170 BPM are *not* the same tempo, because the same pulse written
+at each differs in note values — the grid, the swing and every quantise decision differ
+with it. Kim made that correction; an earlier "86% allowing an octave" figure was
+flattering the result. The bar count is stored as the evidence for a tempo, so the
+claim can be checked rather than taken on trust.
 
-## The one open thread
+## The open thread: Phase A.5, on a branch
 
-**A Gemini review of the sidecar architecture.** The brief was written but never sent:
-it needs Kim signed in to the **built-in** browser (it was signed out, and therefore
-pinned to Flash-Lite). Deliberately deferred to a fresh session, being a
-reasoning-heavy conversation.
+**Branch `phase-a5-tonal-routing`, deliberately NOT merged.** It splits a tonal
+one-shot three ways — harmonic / chord / inharmonic — with chord root and quality from
+the unfolded partials.
 
-Two decisions that go with it, already reasoned through and still standing:
+* **Synthetic: 9/9**, including a *missing fundamental* named correctly.
+* **Real material: not good enough.** Of five files Ableton names "Chord", one routes
+  as a chord and three land in *inharmonic*.
+* **Why it is hard, so nobody re-derives it:** the group separation (Cohen d 1.26)
+  hides a per-file overlap exactly where the decision is made — `Bass Guitar Note F`
+  scores 0.685 and `Guitar Chord Jazz CMaj9` scores 0.681. A real note and a real
+  chord, four thousandths apart.
+* **Still to do:** the columns (`tonality`, `chord_root`, `chord_quality`,
+  `harmonic_fit`) do not exist in either repo, so nothing is persisted yet.
 
-* **Start a NEW Gemini chat**, not the existing MidiGen one — different architecture and
-  vocabulary, and Gemini's cross-chat memory bleeding sidecar facts into MidiGen
-  discussions is a known failure mode.
-* **Do not use the external Chrome.** Kim was explicit. The built-in browser only.
+**Do not re-chase the chroma-density gate.** It was the agreed design and it measures
+*backwards*: real single notes come out denser than real chords. Harmonic 3 of a note
+is its fifth, harmonic 5 its major third, harmonic 7 its minor seventh — a raw sawtooth
+*is* a dominant seventh in chroma space. Folding destroys the distinction before any
+threshold sees it.
 
-## Known, deliberately unfixed
+## Phase B — not started
 
-* **22 files fail to decode** and are recorded with an `error`. Every one is a macOS
-  AppleDouble stub (`._Name.wav`) inside Akai MPC content — metadata forks, not audio.
-  They never surface in results (`f.error IS NULL` filters them), so this is cosmetic;
-  the scanner could skip `._*` outright.
-* **AudioSet has no `kick` and no `tom` class**, so those can never be named
-  specifically however good the analysis gets. Not a bug, a vocabulary ceiling.
-* **`Clapping` in AudioSet means audience applause.** A produced clap one-shot is a
-  sharp transient, which the model reasonably hears as nearer a gunshot.
+The drum classifier on the stored embeddings, labelled by folder ∩ filename with
+contradictions dropped. It closes the vocabulary hole AudioSet cannot fill (no `kick`
+class, no `tom` class). Everything it needs is already in the database.
 
-## Changed on 2026-08-15 (later session)
+## The peer review
 
-`live_find_sound`'s `query` **now searches what a file was heard as, not only what it is
-called.** It was a bare `f.path LIKE`, which made the tool's most-reachable parameter a
-filename grep wearing a listening result's clothes — `query="cymbal"` returned files
-tagged `Steam` and `Tools`, ranked `relevance: 0.0`, with nothing saying the audio had
-never been consulted.
+Gemini (Pro, in the **built-in** browser — never the external Chrome) has reviewed the
+architecture with the full picture of both programs. Its contributions that changed the
+design: routing-first ordering, width measured above 250 Hz, the YIN guards for 808s,
+time-to-peak as a *decision-making* tag, and the four-way tonal split. It has been
+wrong twice — assuming CLAP/Essentia at runtime, and the chroma gate — and took both
+corrections. See `PLAN.md`.
 
-Now: matched **word by word** across both tag labels and the path, scored with the tag's
-own confidence plus `_NAME_WEIGHT` for a name hit, and every result carries
-**`matched_by`** (`heard` / `name` / `heard+name`) so the two can never be confused
-again. The filename half is kept deliberately — in a library named by content the name
-is real evidence, and without the sidecar it is the only seed
-`live_similar_sounds` can start from.
+## ⚠️ The trap that has now been set three times
 
-Measured on the real index: `query="cymbal"` went from MPC demo files tagged `Steam` at
-0.0, to actual crash cymbals tagged `Cymbal` at 1.14. `query="vinyl crackle"` now puts
-the file tagged `Crackle` on top — a phrase match never found it, because no single
-label reads "vinyl crackle".
-
-⚠️ **A running MCP server keeps the old code.** The change is only visible after the
-bridge's host process is restarted; a live `live_find_sound` call will otherwise still
-return `relevance: 0.0` and no `matched_by`, which looks exactly like the bug.
-
-**Scores are comparable only WITHIN one query.** They are averaged over the words, so
-adding a word that matches little drags the average down — `pad ambient` scores below
-`ambient` on the same file. Ranking only ever compares files inside one query, where the
-ordering is the wanted one.
+**Bump the analyzer version when the analysis changes.** If it does not change, a
+re-scan compares identical version strings, skips every file, and reports success
+having re-analysed none. `decode.MEL_VERSION` and `features.FEATURE_VERSION` both feed
+it. Adding a *column* additionally needs `SCHEMA_VERSION` bumped in **both** repos —
+`CREATE TABLE IF NOT EXISTS` will not add it, and the run would otherwise stamp the new
+version onto the old tables.
