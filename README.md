@@ -117,17 +117,24 @@ can be trained on the library without decoding it again.
 ### How good are the measurements?
 
 Filenames are again the ground truth, and again noisy — but a file called
-`Drumloop 11 170BPM.wav` is a real claim about itself.
+`Drumloop 11 170BPM.wav` is a real claim about itself. Measured across the whole
+**29,869-file** index:
 
 | | |
 |---|---|
-| Tempo within 2.5 BPM of the stated one | **65%** |
-| Tempo right, or out by an exact octave/factor | **86%** |
-| Pitch class matching a note named in the filename | **71%** |
+| Tempo within 2.5 BPM of the stated one (n=546) | **57%** |
+| Pitch class matching a note named in the filename (n=3,671) | **74%** |
 
-**Tempo is the weakest number here and the reasons are known.** Octave and metrical
-ambiguity is genuine — a 170 BPM drum-and-bass loop read as 85 is musically the same
-tempo — and the remaining errors concentrate on material with a strong dotted-eighth
-layer. Every estimate carries a confidence, so a caller can demand better.
+**Tempo is the weakest measurement, and octave errors are counted as errors.** That is
+deliberate. It is tempting to score 85 BPM as "right" for a 170 BPM loop, which would
+lift the figure to 78% — but they are not the same tempo. The same pulse written at 85
+and at 170 differs in note values, so the grid, the swing and every quantise decision
+differ with it; by that logic an eighth and a sixteenth would be interchangeable.
+Forgiving the octave flatters the number and misleads the caller.
+
+Where the file's LENGTH settles the question it is used: a loop cut to a whole number
+of bars has its tempo fixed by its duration, far more precisely than by its envelope.
+That bar count is stored, so a BPM can be checked rather than taken on trust. Every
+estimate also carries a confidence.
 
 Apache-2.0.

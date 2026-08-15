@@ -16,6 +16,16 @@ LIVE_DB = (Path(os.environ.get("LOCALAPPDATA", "")) / "Ableton" / "Live Database
 
 
 def main(argv=None) -> int:
+    # A 45-minute scan that finished, committed every row, and then died on a PRINT is
+    # the worst way to fail: the exit code says failure about work that succeeded. On
+    # Windows a redirected stdout is cp1252, so one non-ASCII character in a summary
+    # line raises UnicodeEncodeError after all the work is done. Degrade the character
+    # instead of the run.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):        # not a real stream (tests, pipes)
+            pass
     p = argparse.ArgumentParser(prog="listener", description=__doc__)
     p.add_argument("--folder", type=Path, action="append", dest="folders",
                    help="scan this folder instead of Live's index (repeatable)")
@@ -69,9 +79,11 @@ def main(argv=None) -> int:
     for k, v in result.items():
         print(f"  {k:<16} {v}")
     print(f"  database        {args.out}")
-    if not args.no_tag:
-        print("\n⚠️  tags are UNVALIDATED — the mel-spectrogram parameters have not "
-              "yet been checked against Essentia's own implementation.")
+    # The warning that used to live here — "tags are UNVALIDATED, the mel parameters
+    # have not been checked against Essentia" — was true when written and stopped being
+    # true once the spectrograms were verified (see docs/MEL_VALIDATION.md). A stale
+    # warning is worse than none: it tells every future user to distrust output that
+    # has since been proven correct.
     return 0
 
 
