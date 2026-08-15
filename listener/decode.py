@@ -24,6 +24,15 @@ import soundfile as sf
 TARGET_SR = 16000
 MAX_SECONDS = 30.0          # a 10-minute stem tells us nothing a preview does not
 
+#: Bump this whenever the spectrogram changes. It is part of the analyzer version
+#: (see run.Tagger.version), because resumability compares versions to decide what to
+#: skip — and a mel change alters every stored tag while leaving the model set
+#: identical. Getting this wrong once already caused a "re-scan" that skipped all
+#: 22,100 files and reported success.
+#: v2 = verified against Essentia (power spectrum for MusiCNN; 512-pt FFT, htk mel,
+#:      mel-domain slopes and ln(x+0.01) for VGGish).
+MEL_VERSION = "mel2"
+
 
 @dataclass(frozen=True)
 class MelConfig:

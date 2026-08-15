@@ -87,7 +87,7 @@ class Tagger:
         # dutifully skipped all 22,100 files and reported success without re-analysing
         # anything. Resumability worked; the version was an incomplete description of
         # the analysis.
-        self.version = (f"discogs-effnet-1+{len(self.heads)}heads-1"
+        self.version = (f"{decode.MEL_VERSION}+discogs-effnet-1+{len(self.heads)}heads-1"
                         + (f"+yamnet-1(k{EVENT_TOP_K},f{EVENT_FLOOR})"
                            if self.yamnet else ""))
 
