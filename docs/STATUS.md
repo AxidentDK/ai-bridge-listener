@@ -52,10 +52,34 @@ resolved by `SELECT … WHERE path=?`, and **`PRAGMA foreign_keys` is ON** (SQLi
 disables it per connection by default, so every `REFERENCES` clause was decoration).
 `tests/test_db.py` pins it — write A, write B, re-write A, check A's tags are still A's.
 
-## The one outstanding re-scan — DEFERRED ON PURPOSE
+## The re-scan — STARTED 2026-08-16 ~16:45, running
 
-The code is on **`feat7`**; the index is on **`feat5`**. Kim's instruction on 2026-08-16
-was *"build but wait doing the rescan"*, so the changes landed and the scan did not.
+Kim's instruction was *"build but wait doing the rescan"* through the afternoon; he
+released it at the end of the day. Verified running: the analyzer string is being
+written as `mel2+feat7+...`, which is the thing that must change or a re-scan compares
+identical strings, skips every file and **reports success without re-analysing one**.
+
+**A backup was taken first: `~/.ai-bridge/sound_index.pre-feat7.db`**, verified
+byte-identical by SHA-256 before the scan started. The scan rewrites properties and tags
+in place, and the last time this table was rewritten it was silently corrupted for days
+(see the lastrowid bug above), so a rollback point is cheap insurance rather than
+ceremony.
+
+The roots were derived FROM THE INDEX rather than from memory — a count of distinct
+top-level paths over all 29,870 files — because taking the list from Live's own database
+silently produces an index a fifth of the size:
+
+    C:/ProgramData/Arturia            13,165
+    <user home>/Documents              7,147   (Xfer, Synapse, u-he, NI, Vital…)
+    C:/ProgramData/Ableton             6,399
+    C:/ProgramData/Akai                  926
+    <sample drive>/<loop packs>        1,675
+    <sample drive>/<free packs>          543
+
+*The section below describes what the scan is fixing; leave it until the scan finishes,
+then reduce it to a line saying the index and code agree.*
+
+The code is on **`feat7`**; the index was on **`feat5`**.
 
 `feat6` changes less than the version bump suggests: **the maths is
 identical** — proven bit-for-bit against `feat5` on 120 real files — but it now runs on
