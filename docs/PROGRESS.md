@@ -16,6 +16,88 @@ commit messages, and nobody reconstructs the story from those six months later.
 
 ---
 
+## 2026-08-16 — one DSP core for two programs, and a drum classifier that can say "no"
+
+Two days of measurement bugs had one shape in common, so the day was spent on the shape
+rather than on more bugs.
+
+### The duplication was the root cause, not a side effect
+
+Three times in one night a fix was made in `listener/features.py` and then hand-ported
+into `host/audio_features.py`, and three times the port arrived broken while looking
+correct. The clearest case: a tempo fix copied across at 03:00, carrying the paragraph
+that explained the bug it no longer fixed. A comment saying "keep these in sync" was
+already at the top of both files. Reading a warning is not executing one.
+
+**`listener/shared_dsp.py`** now owns onsets, tempo (autocorrelation + perceptual prior
++ events-per-beat + whole-bar snapping), chroma, Krumhansl key scoring, spectral
+flatness, envelope, stereo and BS.1770-4 loudness. `features.py` went 869 → 245 lines,
+`audio_features.py` 304 → 180, and `describe.py` lost its own copy of the key profiles
+entirely — so the MIDI tier and the audio tier can no longer come to disagree about
+what "F minor" means.
+
+**The move is proven, not asserted.** Fed the same mono signal, old and new agree to
+0.000e+00 across 120 real library files at seven sample rates — bit-identical, not
+"within a tolerance", because a tolerance passes a transposed constant. Writing that
+test first is why the swap was allowed to happen at all; a hand-move is precisely the
+operation that had already failed three times here.
+
+**Rule 1: the core owns pre-processing.** The obvious API — take `(array, rate)` and
+let each caller resample — would have moved the drift rather than removed it, since the
+two programs would still each pick their own resampling. `prepare()` is the only way in,
+`measure()` raises `TypeError` on a raw array, and the type is the enforcement instead
+of a comment asking nicely.
+
+**The sync check is a hash.** `verify_against_bridge`, the schema check this was
+modelled on, compares substrings and would pass a renamed column type; it has never
+drifted, but not because it would have caught it. `test_shared_dsp_sync.py` — identical
+in both repos — compares SHA-256 over the whole file, which as a side effect forces
+`shared_dsp.py` to stay self-contained. It earned its keep within the hour: an edit
+written through Python on Windows silently became CRLF, and the checker said so, naming
+line endings as the likely cause, rather than printing two hashes and leaving a guess.
+
+**Snapping became the caller's decision**, found by the bridge's own tests going red
+after the swap. Bar snapping assumes the file is a whole number of bars — true of a
+library loop, worth 12 accuracy points there, false for the arbitrary audio the bridge
+analyses, where a genuine 90 BPM clip lasting a bar and a half gets pulled to 120. The
+maths is shared; the policy is not.
+
+**The first dividend, fixed once instead of twice.** `attack_ms` was `argmax` over a
+smoothed envelope, which on a sustained sound decides on numerical noise. `ORGAN9.wav`
+has 69 envelope samples within 0.1% of its maximum spread over 1.13 s, with 3e-8
+between the top two — so its stored attack swung 409.1 ms → 90.9 ms on any change to
+decoding, and about 2% of one-shots are shaped that way. Timing the FIRST arrival at
+peak level is both stable under perturbation (27.3 ms across perturbations from 0 to
+1e-5) and the musically correct question: attack is when a sound arrives at its level,
+not when its single largest sample falls.
+
+`FEATURE_VERSION` → `feat6`. The maths is unchanged, but the signal it measures now
+comes from the shared resampler, and a few values move with it (2 of 42 tempos by
+0.1 BPM). **The index deliberately stays on `feat5`** — the re-scan is a separate,
+deliberate act, not a side effect of a refactor.
+
+### Phase B — a drum classifier with a way out
+
+AudioSet has no vocabulary for the distinctions a producer actually browses by: kick vs
+tom vs rim, clap vs snare. So `drums.py` trains a small softmax regression on the stored
+Discogs-EffNet embeddings, labelled from paths — filename beating folder, contradictions
+dropped rather than guessed.
+
+The first run labelled **13,697 files**, including synth chords at 0.98 confidence. The
+fault is structural, not a threshold to tune: a closed-set softmax has to pick a class
+and has no way to answer "none of the above". Gating on AudioSet percussion events plus
+the one-shot property brought it to **5,429**. The `PERCUSSIVE_EVENTS` list is an
+explicit tuple and not a `LIKE` pattern, because `%rum%` matches "inst-**rum**-ent".
+
+### What went wrong on my side, recorded because it will recur
+
+`git add -A` swept an agent's work-in-progress into the drum-gate commit `b77ab1e`, so
+that commit contains all 1,040 lines of `shared_dsp.py` and its two test files under a
+message about drum gating. It stands as it is: correcting it means rewriting published
+history, which requires Kim's explicit yes. The real fix is staging by path.
+
+---
+
 ## 2026-08-15 → 16 — the long night: measurement, peer review, and a silently corrupt index
 
 Started as "continue with the sidecar". Ended with ~20 bugs fixed across both repos and

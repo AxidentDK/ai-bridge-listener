@@ -5,7 +5,7 @@ a session ended**, so the next session had to reconstruct it from git log, a SQL
 file, and eventually the raw transcript. **Update it at the end of a session, even when
 everything is green** — "nothing is blocked" is itself worth writing down.
 
-Last updated: **2026-08-16**, after a long review-and-fix session.
+Last updated: **2026-08-16**, after the shared-DSP extraction and the drum classifier.
 
 ---
 
@@ -13,11 +13,13 @@ Last updated: **2026-08-16**, after a long review-and-fix session.
 
 | | |
 |---|---|
-| `ai-bridge-listener` | 28 tests passing (`test_features.py` 23, `test_db.py` 5) |
-| `ai-bridge-for-ableton-live` | 125 tests passing |
-| Index | **29,870 files, 1,364,217 tags, 1 failure, ZERO orphans** |
-| Index analyzer | `mel2+feat4+…+25heads-2` |
-| Code analyzer | **`feat5`** — see "the one outstanding re-scan" below |
+| `ai-bridge-listener` | **51 tests passing** — features 19, shared_dsp 15, drums 9, db 5, sync 3 |
+| `ai-bridge-for-ableton-live` | **118 tests passing**, incl. the same 3 sync tests |
+| Index | **29,870 files, 1,369,646 tags, 29,869 properties, ZERO orphans** |
+| Index analyzer | `mel2+feat5+discogs-effnet-1+25heads-2+yamnet-1(k15,f0.02)` |
+| Code analyzer | **`feat6`** — see "the one outstanding re-scan" below |
+| DSP core | `shared_dsp.py`, byte-identical in both repos, SHA-256 checked by both suites |
+| Drum labels | **5,429** files in the `drum` namespace (kick/snare/clap/hat/…) |
 
 **Measured accuracy** (filenames as ground truth, octave errors counted as ERRORS):
 
@@ -45,13 +47,20 @@ resolved by `SELECT … WHERE path=?`, and **`PRAGMA foreign_keys` is ON** (SQLi
 disables it per connection by default, so every `REFERENCES` clause was decoration).
 `tests/test_db.py` pins it — write A, write B, re-write A, check A's tags are still A's.
 
-## The one outstanding re-scan
+## The one outstanding re-scan — DEFERRED ON PURPOSE
 
-The code is on **`feat5`**; the index is on **`feat4`**. The difference is the chroma
-fix (a longer window, averaged per pitch class), so **stored `key`/`scale` values are
-stale**. Everything else — tags, pitch, tempo, stereo, loudness — is current.
+The code is on **`feat6`**; the index is on **`feat5`**. Kim's instruction on 2026-08-16
+was *"build but wait doing the rescan"*, so the swap landed and the scan did not.
 
-A full re-scan takes about 65 minutes. Nothing is blocked by it.
+What `feat6` changes is smaller than the version bump suggests: **the maths is
+identical** — proven bit-for-bit against `feat5` on 120 real files — but it now runs on
+audio from the shared Kaiser resampler rather than soxr, and a few values move with the
+samples (2 of 42 tempos by 0.1 BPM). The one substantive change is `attack_ms`, which
+was unstable on sustained one-shots and is now stable; roughly 2% of one-shots have a
+stored attack worth distrusting until the scan runs.
+
+Everything else — tags, key, pitch, tempo, stereo, loudness, drum labels — is current
+and correct. **Nothing is blocked by this.** A full re-scan takes about 65 minutes.
 
 ## ⚠️ How to run a FULL scan
 
@@ -79,14 +88,25 @@ Three databases are on disk under `~/.ai-bridge/`. Only the first is live:
 | `sound_index.corrupt-lastrowid.db` | 674 MB | evidence for the bug above; safe to delete |
 | `sound_index.v1-backup.db` | 659 MB | pre-`properties` backup; safe to delete |
 
-## The recommendation worth acting on
+## ✅ DONE — the recommendation that was worth acting on
 
-**The listener and the bridge measure the same things twice, and hand-porting between
-them does not work.** Three separate faults tonight existed in both programs at once,
-and one of them was a bug fixed in the listener at 01:00 and reproduced verbatim in the
-bridge at 03:00 — with the explanatory comment copied across intact. Tempo, chroma, key,
-onset detection, envelope and loudness all exist in two versions. They should share one
-implementation.
+*Left here rather than deleted: it names the problem better than a changelog line, and
+the failure mode is one to stay alert to.*
+
+**The listener and the bridge measured the same things twice, and hand-porting between
+them did not work.** Three separate faults existed in both programs at once, and one was
+a bug fixed in the listener at 01:00 and reproduced verbatim in the bridge at 03:00 —
+with the explanatory comment copied across intact.
+
+Fixed on 2026-08-16. `shared_dsp.py` owns onsets, tempo, chroma, key scoring, flatness,
+envelope, stereo and loudness; both repos hold the same file byte for byte and both test
+suites fail on drift, by SHA-256 over the whole file rather than by substring. The
+listener is the source of truth; the bridge's copy is verified, never edited. `prepare()`
+is the only way in, so the two programs cannot diverge on pre-processing either — that
+was the hole the obvious `(array, rate)` API would have left open.
+
+**If you are about to copy a measurement fix between the repos: don't.** Change
+`listener/shared_dsp.py`, copy the whole file, run both suites.
 
 ## Open, not started
 
@@ -94,8 +114,21 @@ implementation.
   chord / inharmonic). 9/9 synthetic, unreliable on real material (1 of 5 real chords
   routed right). The blocker is a per-file overlap: a real note scores 0.685 and a real
   chord 0.681.
-* **Phase B** — the drum classifier on the stored embeddings. Everything it needs is in
-  the database; nothing has been written.
+* **The `feat6` re-scan**, deferred deliberately — see above.
+* **Agent tool-calling in Live** — the sidecar's search tools have never been exercised
+  end to end from an agent inside a real session.
+
+## ✅ DONE — Phase B, the drum classifier
+
+Softmax regression over the stored Discogs-EffNet embeddings, labelled from paths
+(filename beats folder; contradictions dropped rather than guessed), covering the
+distinctions AudioSet has no vocabulary for: kick vs tom vs rim, clap vs snare.
+
+The thing worth remembering: the first run labelled **13,697 files**, including synth
+chords at 0.98 confidence. That is not a threshold to tune — a closed-set softmax must
+pick a class and cannot answer "none of the above". Gating on AudioSet percussion events
+plus the one-shot property brought it to **5,429**, which is in the index now. Retrain
+or re-apply with `python -m listener.drums_cli --train` / `--apply`.
 
 ## The review process
 
