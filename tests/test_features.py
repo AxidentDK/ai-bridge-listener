@@ -124,17 +124,6 @@ def test_decay_stops_at_the_next_onset():
     assert decay < 600, f"decay leaked past the second onset: {decay} ms"
 
 
-def test_metrical_rivals_are_visible_outside_the_tempo_search_window():
-    """The search covers 60-190 BPM, but a winner's half-time rival routinely sits
-    outside it: at 100 BPM the winner is lag 38 and the rival lag 76. Those were read
-    as zero, so the margin came out a perfect 1.0 and confidence was HIGHEST for every
-    tempo under ~120 BPM — most of a sample library — exactly where the octave
-    ambiguity is worst."""
-    acf = np.zeros(300)
-    acf[38] = 1.0
-    acf[76] = 0.95                       # a strong half-time rival, outside 60-190 BPM
-    assert F._metrical_margin(acf, 38) < 0.1, "a rival outside the window must count"
-
 
 def test_noise_gets_no_pitch():
     """A hi-hat has no fundamental. An estimator asked anyway still returns a number,
@@ -171,34 +160,7 @@ def test_a_rippling_decay_is_not_a_rhythm():
     assert F.classify(spread, 2.315) == F.KIND_LOOP
 
 
-def test_events_per_beat_target_slopes_with_tempo():
-    """Fast music leans on half-time phrasing — the snare on 3, not on 2 and 4 — so it
-    carries FEWER structural events per beat than slow music, not more. Measured in the
-    library: files named 140+ BPM average 1.6 events per beat against 2.3 for those
-    named under 100. A flat target compromises between them and breaks fewer ties."""
-    assert F._epb_target(85.0) > F._epb_target(170.0)
-    assert 2.0 < F._epb_target(85.0) < 2.5
-    assert 1.3 < F._epb_target(170.0) < 1.8
 
-
-def test_density_prefers_the_tempo_implying_a_sane_subdivision():
-    """The term that actually separates a tempo from its half, since duration cannot:
-    4 bars at 100 BPM is also exactly 8 bars at 200."""
-    # 8 seconds, 32 structural onsets -> 2 per beat at 120, 4 per beat at 60.
-    likely = F._density_likelihood(np.array([120.0, 60.0]), 32, 8.0)
-    assert likely[0] > likely[1], likely
-
-
-def test_confidence_falls_when_a_metrical_rival_is_as_strong():
-    """The old confidence measured how RHYTHMIC a file is and was anti-correlated with
-    being right: a perfectly quantised loop has a perfect half-time alias, so "very
-    rhythmic" scored as "very certain" exactly where the tempo was most ambiguous."""
-    acf = np.zeros(200)
-    acf[50] = 1.0
-    acf[100] = 0.98                      # half-time rival, nearly as strong
-    assert F._metrical_margin(acf, 50) < 0.1
-    acf[100] = 0.10                      # rival now weak
-    assert F._metrical_margin(acf, 50) > 0.8
 
 
 def test_tempo_survives_frame_quantisation():

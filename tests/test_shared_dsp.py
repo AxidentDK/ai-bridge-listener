@@ -217,26 +217,51 @@ def test_every_routed_measurement_is_identical_on_real_files():
 
 
 def test_measure_reproduces_analyze_field_for_field():
-    """``measure()`` is what both programs will call, so it — not just its parts — has
-    to match. Fed the same mono, every field ``features.analyze`` produces must come
-    back identical. Pitch is excluded because it is not shared; see the module note."""
+    """``measure()`` fed the SAME mono must reproduce what analyze produces.
+
+    This is the test that authorised the swap, and it is worth being precise about what
+    it proves NOW that the swap has happened. Before it, `analyze` had its own copy of
+    the maths and this compared two implementations — bit-identical, 0.000e+00, across
+    120 real files. Today `analyze` calls `measure`, so the maths cannot differ; what
+    this still guards is that `analyze` keeps handing the shared core a faithful signal
+    and passing its fields through unchanged.
+
+    The one thing that legitimately DOES differ is pre-processing, and it is asserted
+    as a tolerance rather than equality: `analyze` now resamples through
+    `shared_dsp.prepare` while this constructs `Prepared` from the mel pass's soxr
+    output. That is trap 1 being closed — both programs measuring one signal instead of
+    each choosing their own — and it moves a few values by a hair. See
+    `test_owning_the_resampling_moves_the_numbers_only_slightly` for the size of it.
+    """
     files = _real_files()
     if not files:
         _report_skip("measure/analyze equivalence")
         return
-    shared_fields = ("kind", "onsets", "attack_ms", "decay_ms", "stereo_width",
-                     "stereo_correlation", "loudness_lufs", "bpm", "bpm_confidence",
-                     "bars", "key", "scale", "key_strength")
+    # `onsets` is a COUNT off the resampled signal, so it belongs with the tolerant
+    # group: a tambourine shake came back 19 against 18, one detection either side of a
+    # threshold on a different set of samples. What matters is that `kind` — the routing
+    # decision that count feeds — still agrees exactly, and it does.
+    exact_fields = ("kind", "key", "scale", "bars")
+    close_fields = ("onsets", "attack_ms", "decay_ms", "stereo_width",
+                    "stereo_correlation", "loudness_lufs", "bpm", "bpm_confidence",
+                    "key_strength")
     for path, _dur, _rate, _ch, _kind in files:
         audio, sr, mono, duration = _decode(path)
         old = F.analyze(audio, sr, mono, duration)
-        # Constructed directly rather than through prepare(), because this test is
-        # about the MATHS: it must see the same samples features.py sees today. The
-        # pre-processing change is measured separately, below.
         new = S.measure(S.Prepared(mono, audio, sr, duration))
-        for field in shared_fields:
+        for field in exact_fields:
             assert old.get(field) == new.get(field), (
                 f"{field}: {old.get(field)!r} vs {new.get(field)!r} on {path}")
+        for field in close_fields:
+            a, b = old.get(field), new.get(field)
+            if a is None or b is None:
+                assert a == b, f"{field}: {a!r} vs {b!r} on {path}"
+                continue
+            # Generous in absolute terms and tight in relative terms: 1 ms of envelope
+            # timing or 0.5 BPM is nothing musically, but a factor-of-two error is not
+            # a resampler artefact and must still fail here.
+            assert abs(a - b) <= max(1.0, abs(a) * 0.02), (
+                f"{field}: {a!r} vs {b!r} on {path}")
 
 
 def test_synthetic_signals_agree_too():
@@ -312,6 +337,19 @@ def test_owning_the_resampling_moves_the_numbers_only_slightly():
     The one thing that must NOT move is anything measured on the SOURCE: stereo width,
     correlation and BS.1770 loudness never touch the resampler, and a difference in
     those would mean the pre-processing had leaked somewhere it should not be.
+
+    ⚠️ ATTACK IS PRINTED AND NOT ASSERTED, and the reason is worth knowing before
+    anyone reads a large number here as a regression. ``envelope`` takes ``argmax`` of
+    the smoothed envelope, and a sustained sound has no single peak — a real library
+    file (a 1.16 s organ one-shot) holds 69 samples within 0.1% of its maximum, spread
+    across 1.15 s of the file. Which of them wins is decided by differences of 3e-5,
+    so ANY change to the signal — a different resampler, a different decoder, dither —
+    flips the reported attack by hundreds of milliseconds. Measured on that file:
+    409.1 ms through soxr against 90.9 ms through ours, for the same audio.
+    That fragility is in ``features.envelope`` today and was moved across unchanged;
+    it is a real bug and it is NOT this refactor's to fix silently, because fixing it
+    would break the byte-equivalence the tests above rely on. It wants a tie-break
+    (the FIRST sample reaching the peak, say) as its own change, with its own re-scan.
     """
     files = _real_files()
     if not files:
@@ -377,22 +415,31 @@ BRIDGE_REPO = os.environ.get(
 def test_the_bridges_key_estimator_would_survive_the_swap():
     """``describe.key_from_histogram`` is the bridge's key estimator and it carries its
     own copy of the profiles, the correlation and the contrast gate. After the swap it
-    calls ``shared_dsp.key_scores`` instead. This proves that substitution is a no-op
-    BEFORE it is made — the winner, the runner-up, the margin and the refusal all have
-    to come out the same, or the bridge silently starts naming different keys.
+    calls ``shared_dsp.key_scores``, and this proves the substitution stayed a no-op:
+    the winner, the runner-up, the margin and the refusal all still come out the same
+    on 400 histograms, so the MIDI tier and the audio tier cannot drift apart on what
+    'F minor' means.
     """
     host = os.path.join(BRIDGE_REPO, "host")
     if not os.path.exists(os.path.join(host, "describe.py")):
         print(f"        (bridge repo not at {BRIDGE_REPO} — skipped)")
         return
+    # `host` STAYS on the path for the whole test. describe.key_from_histogram imports
+    # shared_dsp lazily — deliberately, so the module remains pure stdlib for machines
+    # with no numpy — and that import resolves at CALL time, not import time. Removing
+    # the path here would break the call while telling us nothing about the bridge,
+    # which always runs with `host` importable.
     sys.path.insert(0, host)
-    try:
-        import describe                                        # noqa: PLC0415
-    finally:
-        sys.path.remove(host)
+    import describe                                            # noqa: PLC0415
 
-    assert describe._MAJOR == S._MAJOR, "major profile differs"
-    assert describe._MINOR == S._MINOR, "minor profile differs"
+    # Before the swap this compared the bridge's OWN copies of the profiles against the
+    # shared ones. It has no copies now — `key_from_histogram` calls `key_scores`
+    # directly — so the thing worth asserting is that the duplication is really gone
+    # and that the two still agree end to end on 400 histograms below.
+    assert not hasattr(describe, "_MAJOR"), (
+        "describe.py has grown its own key profile again — that is the duplication "
+        "this module exists to remove")
+    assert not hasattr(describe, "_correlate"), "describe.py has its own scorer again"
     assert describe._MIN_TONAL_CONTRAST == S.MIN_TONAL_CONTRAST, "contrast gate differs"
     assert describe.NOTE_NAMES == S.NOTE_NAMES, "note names differ"
 
@@ -413,6 +460,54 @@ def test_the_bridges_key_estimator_would_survive_the_swap():
         assert theirs["margin"] == round(float(score - ours[1][0]), 3)
         assert theirs["runner_up"] == f"{S.NOTE_NAMES[ours[1][1]]} {ours[1][2]}"
 
+
+
+# --- tempo internals: moved here with the code they test ---------------------
+# These lived in test_features.py and exercised private helpers (_epb_target,
+# _density_likelihood, _metrical_margin). Those helpers are now in shared_dsp, so
+# the tests follow them: a test that reaches into a module's privates belongs
+# beside that module, not beside whoever used to own the code.
+
+def test_events_per_beat_target_slopes_with_tempo():
+    """Fast music leans on half-time phrasing — the snare on 3, not on 2 and 4 — so it
+    carries FEWER structural events per beat than slow music, not more. Measured in the
+    library: files named 140+ BPM average 1.6 events per beat against 2.3 for those
+    named under 100. A flat target compromises between them and breaks fewer ties."""
+    assert S._epb_target(85.0) > S._epb_target(170.0)
+    assert 2.0 < S._epb_target(85.0) < 2.5
+    assert 1.3 < S._epb_target(170.0) < 1.8
+
+
+def test_density_prefers_the_tempo_implying_a_sane_subdivision():
+    """The term that actually separates a tempo from its half, since duration cannot:
+    4 bars at 100 BPM is also exactly 8 bars at 200."""
+    # 8 seconds, 32 structural onsets -> 2 per beat at 120, 4 per beat at 60.
+    likely = S._density_likelihood(np.array([120.0, 60.0]), 32, 8.0)
+    assert likely[0] > likely[1], likely
+
+
+def test_confidence_falls_when_a_metrical_rival_is_as_strong():
+    """The old confidence measured how RHYTHMIC a file is and was anti-correlated with
+    being right: a perfectly quantised loop has a perfect half-time alias, so "very
+    rhythmic" scored as "very certain" exactly where the tempo was most ambiguous."""
+    acf = np.zeros(200)
+    acf[50] = 1.0
+    acf[100] = 0.98                      # half-time rival, nearly as strong
+    assert S._metrical_margin(acf, 50) < 0.1
+    acf[100] = 0.10                      # rival now weak
+    assert S._metrical_margin(acf, 50) > 0.8
+
+
+def test_metrical_rivals_are_visible_outside_the_tempo_search_window():
+    """The search covers 60-190 BPM, but a winner's half-time rival routinely sits
+    outside it: at 100 BPM the winner is lag 38 and the rival lag 76. Those were read
+    as zero, so the margin came out a perfect 1.0 and confidence was HIGHEST for every
+    tempo under ~120 BPM — most of a sample library — exactly where the octave
+    ambiguity is worst."""
+    acf = np.zeros(300)
+    acf[38] = 1.0
+    acf[76] = 0.95                       # a strong half-time rival, outside 60-190 BPM
+    assert S._metrical_margin(acf, 38) < 0.1, "a rival outside the window must count"
 
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

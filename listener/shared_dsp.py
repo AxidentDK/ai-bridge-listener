@@ -446,6 +446,11 @@ def stereo(audio, sr: int):
 _ENV_SMOOTH_S = 0.005
 
 
+#: How close to the maximum still counts AS the maximum when timing the attack.
+#: 0.1% is far below anything audible and far above float noise.
+_PEAK_TOLERANCE = 0.001
+
+
 def smoothed_envelope(mono, sr: int = ANALYSIS_SR):
     """|x| through a short moving average — the amplitude envelope everything else
     reads. Exposed separately because callers want more from it than attack and decay
@@ -480,8 +485,23 @@ def envelope(mono, onsets, kind: str, sr: int = ANALYSIS_SR):
     limit = len(env)
     if len(onsets) > 1:
         limit = max(1, min(limit, int(onsets[1] * sr)))
-    peak_idx = int(np.argmax(env[:limit]))
-    peak = float(env[peak_idx])
+    # FIRST time the envelope reaches its peak, not argmax's arbitrary winner.
+    #
+    # A sustained one-shot has a near-flat top, and argmax then decides on numerical
+    # noise. `ORGAN9.wav` in this library has 69 envelope samples within 0.1% of its
+    # maximum, spread over 1.13 s, and the gap between the top two is 3e-8 — so any
+    # change to decoding moved its reported attack by a full second, and roughly 2% of
+    # one-shots are shaped like that. The stored value was not reproducible.
+    #
+    # Taking the first sample that reaches the peak within a tolerance is both stable
+    # AND the musically correct question: attack is when the sound ARRIVES at its
+    # level, not when its single largest sample happens to fall.
+    window = env[:limit]
+    peak = float(window.max())
+    if peak > 0:
+        peak_idx = int(np.argmax(window >= peak * (1.0 - _PEAK_TOLERANCE)))
+    else:
+        peak_idx = 0
     attack_ms = round(peak_idx * 1000.0 / sr, 1)
     if kind == KIND_LOOP:
         # What a loop decays to is its next hit, not silence. Gating this on the ONSET
@@ -772,7 +792,8 @@ def _snap_to_whole_bars(bpm: float, duration: float | None):
     return bpm, None
 
 
-def tempo(onsets, flux=None, sr: int = ANALYSIS_SR, duration: float | None = None) -> dict:
+def tempo(onsets, flux=None, sr: int = ANALYSIS_SR, duration: float | None = None,
+          snap_to_bars: bool = True) -> dict:
     """BPM by autocorrelation of the onset-strength curve.
 
     This replaced a median inter-onset interval, which measures the COMMONEST GAP
@@ -836,7 +857,15 @@ def tempo(onsets, flux=None, sr: int = ANALYSIS_SR, duration: float | None = Non
                     if abs(denom) > 1e-12:
                         lag = lag + float(np.clip((a - c) / denom, -0.5, 0.5))
                 bpm = 60.0 * frames_per_sec / float(lag)
-                bpm, bars = _snap_to_whole_bars(bpm, duration)
+                # SNAPPING IS THE CALLER'S CALL, because it encodes an assumption
+                # about the material rather than a fact about the signal: that the
+                # file is a whole number of bars. That is true of a sample-library
+                # loop and is what took tempo accuracy from 57% to 69%. It is NOT
+                # true of an arbitrary recording, and there it does damage — a
+                # genuine 90 BPM clip lasting 1.5 bars gets pulled to 120, because
+                # 120 is what a whole number of bars in that duration would mean.
+                bpm, bars = (_snap_to_whole_bars(bpm, duration) if snap_to_bars
+                             else (bpm, None))
                 if _BPM_MIN <= bpm <= _BPM_MAX:
                     # Confidence needs BOTH a strong pulse and an absence of metrical
                     # ambiguity, so the two are multiplied. Prominence alone answered
@@ -998,7 +1027,7 @@ def _k_weight_response(freqs, sr: int):
 # THE ONE ENTRY POINT
 # =====================================================================================
 
-def measure(prepared: Prepared) -> dict:
+def measure(prepared: Prepared, snap_to_bars: bool = True) -> dict:
     """Every measurement both programs share, from one prepared signal.
 
     Takes a ``Prepared`` and nothing else — rule 1. Callers add what only they need:
@@ -1035,6 +1064,7 @@ def measure(prepared: Prepared) -> dict:
     if kind == KIND_LOOP:
         # A loop gets the question asked the other way round: not "what note", but
         # "what key" — which is what a producer needs before dropping it into a set.
-        out.update(tempo(onsets, onset_strength(mono), duration=duration))
+        out.update(tempo(onsets, onset_strength(mono), duration=duration,
+                         snap_to_bars=snap_to_bars))
         out.update(key_from_chroma(chroma_of(mono)))
     return out
