@@ -235,7 +235,7 @@ class Store:
                 [file_id, *vals])
         if embedding is not None and len(embedding):
             # float16 halves the footprint for a vector whose values sit well inside
-            # its range; 22,100 x 1280 is ~56 MB stored, against ~113 MB at float32.
+            # its range; 29,870 x 1280 is ~76 MB stored, against ~153 MB at float32.
             # Stored so the drum classifier can be trained and RE-trained without
             # paying the 14-minute extraction again.
             vec = np.asarray(embedding, dtype=np.float16)

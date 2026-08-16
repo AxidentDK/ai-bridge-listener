@@ -7,12 +7,21 @@ why this module is the one that gets parallelised, and the model does not.
 Everything here is a pure function of a file path, which is what lets it run in a
 process pool: no shared state, no database handle, nothing to lock.
 
-⚠️ THE MEL PARAMETERS BELOW ARE NOT YET VALIDATED against Essentia's own
-``TensorflowInputMusiCNN``. They follow the documented MusiCNN recipe, but the
-failure mode if they are subtly wrong is the dangerous one: **nothing crashes and the
-labels come out confident, plausible and meaningless.** Until a known-good reference
-comparison is done, treat any tag this pipeline produces as unverified. The seam is
-deliberate — ``melspectrogram`` is the only thing that has to change.
+✅ THE MEL PARAMETERS BELOW ARE VALIDATED against Essentia's own
+``TensorflowInputMusiCNN`` and ``TensorflowInputVGGish``. They were NOT, and this
+paragraph used to say so — correctly, at the time. Five constants were wrong and every
+one of them produced correct shapes and plausible values, which is the failure mode
+this module has to be paranoid about: nothing crashes, and the labels come out
+confident and meaningless. They were found by reading Essentia's C++ source rather
+than fitting curves to its output, and the fix is confirmed downstream: tagging the
+same 640 files through our mel and through Essentia's now agrees in all 16 categories.
+See ``docs/MEL_VALIDATION.md`` for the five bugs and the red herrings.
+
+The warning is kept here in its corrected form deliberately. A stale caution is worse
+than none — it tells every future reader to distrust output that has since been proven
+correct — and this project has now removed the same obsolete warning from two other
+places. If ``melspectrogram`` changes again, re-run ``tools/validate_mel_wsl.py``
+before trusting a single tag, and bump ``MEL_VERSION`` below.
 """
 from __future__ import annotations
 
