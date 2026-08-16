@@ -106,6 +106,13 @@ class Store:
         # point of a resumable job you can leave running.
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
+        # SQLite disables foreign keys per connection by DEFAULT, so the REFERENCES
+        # clauses in the schema were decoration. With them enforced, the lastrowid bug
+        # above would have raised "FOREIGN KEY constraint failed" on its very first
+        # row instead of quietly writing 580,000 tags against ids that do not exist.
+        # A guardrail that is declared but not switched on is worse than none: the
+        # schema reads as if something is checking.
+        self.conn.execute("PRAGMA foreign_keys=ON")
         self._migrate_if_older()
         self.conn.executescript(SCHEMA_SQL)
         self._set_meta("schema_version", str(SCHEMA_VERSION))
@@ -171,7 +178,7 @@ class Store:
         A FAILED file is recorded with ``error`` set rather than left out, so the
         next run skips it instead of hitting the same broken file forever.
         """
-        cur = self.conn.execute(
+        self.conn.execute(
             "INSERT INTO files(path, source_path, size_bytes, mtime, duration_sec, "
             "                  sample_rate, channels, analyzed_at, analyzer, error) "
             "VALUES(?,?,?,?,?,?,?,?,?,?) "
@@ -183,10 +190,24 @@ class Store:
             "  error=excluded.error",
             (path, source_path, size, mtime, duration, sample_rate, channels,
              _utc_now(), self.analyzer, error))
-        file_id = cur.lastrowid
-        if not file_id:
-            file_id = self.conn.execute(
-                "SELECT id FROM files WHERE path=?", (path,)).fetchone()["id"]
+        # ALWAYS resolve the id by path. NEVER `cur.lastrowid` here.
+        #
+        # On an `ON CONFLICT DO UPDATE` that takes the UPDATE branch, SQLite leaves
+        # lastrowid at the last row actually INSERTED — a different file's id — and it
+        # is non-zero, so a `if not file_id` fallback never fires. Every re-scan then
+        # wrote that file's tags, properties and embedding against SOMEONE ELSE'S id:
+        #
+        #     INSERT a -> lastrowid 1        INSERT b -> lastrowid 2
+        #     UPDATE a -> lastrowid 2        <- a's real id is 1
+        #
+        # Measured in the live index before this was found: 12,825 orphaned property
+        # and embedding rows and 581,789 orphaned tags, plus an unknown number
+        # silently attached to the WRONG existing file — which is the worse half,
+        # because nothing about it looks broken. It only bites on re-analysis, so a
+        # first scan of an empty database is always clean and the bug hides until the
+        # second run.
+        file_id = self.conn.execute(
+            "SELECT id FROM files WHERE path=?", (path,)).fetchone()["id"]
 
         # Replace rather than merge: a re-analysis supersedes the previous verdict.
         self.conn.execute("DELETE FROM tags WHERE file_id=?", (file_id,))
