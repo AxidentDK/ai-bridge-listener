@@ -19,7 +19,7 @@ Last updated: **2026-08-16**, after the shared-DSP extraction and the drum class
 | Index analyzer | `mel2+feat5+discogs-effnet-1+25heads-2+yamnet-1(k15,f0.02)` |
 | Code analyzer | **`feat6`** — see "the one outstanding re-scan" below |
 | DSP core | `shared_dsp.py`, byte-identical in both repos, SHA-256 checked by both suites |
-| Drum labels | **5,429** files in the `drum` namespace (kick/snare/clap/hat/…) |
+| Drum labels | **6,712** files in the `drum` namespace, refreshed 2026-08-16 after the cymbal fix |
 
 **Measured accuracy** (filenames as ground truth, octave errors counted as ERRORS):
 
@@ -123,6 +123,27 @@ was the hole the obvious `(array, rate)` API would have left open.
 Softmax regression over the stored Discogs-EffNet embeddings, labelled from paths
 (filename beats folder; contradictions dropped rather than guessed), covering the
 distinctions AudioSet has no vocabulary for: kick vs tom vs rim, clap vs snare.
+
+**Refreshed 2026-08-16** after the review found that the 3-second one-shot cap was
+excluding 63.8% of rides and 47.7% of crashes — a crash rings 5-8 s and a ride longer.
+Retraining with the cap at 15 s and loops filtered by `kind` rather than by duration:
+
+| | before | after |
+|---|---|---|
+| ride | 131 | **432** |
+| crash | 85 | **186** |
+| tom | 636 | 841 |
+| kick | 1,061 | 1,312 |
+| perc | 1,326 | 1,743 |
+| **total** | 5,429 | **6,712** |
+
+Stable rather than churned: 5,151 files kept their label, 149 changed it, 1,412 are
+newly tagged and 129 lost a tag. Of the newly tagged files whose NAME states a class,
+99.4% agree with it — a weak check, since those names also feed training, but it does
+establish the new tags are not noise. Held out: 80.0% overall, 93% at confidence >= 0.9.
+
+Re-run any time with `python -m listener.drums_cli --train --apply`; it decodes no audio
+and takes seconds.
 
 The thing worth remembering: the first run labelled **13,697 files**, including synth
 chords at 0.98 confidence. That is not a threshold to tune — a closed-set softmax must
