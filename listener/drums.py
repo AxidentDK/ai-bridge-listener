@@ -69,6 +69,28 @@ _COMPILED = {name: re.compile(rx, re.I) for name, rx in CLASS_PATTERNS.items()}
 #: Above this a file is a loop that FEATURES kicks, not a kick sample. A drum one-shot
 #: is short; three seconds is generous for one and short for a bar of anything.
 MAX_ONE_SHOT_SECONDS = 3.0
+
+#: THE GATE, and the reason it exists. This is a CLOSED-SET classifier: it was trained
+#: only on files whose names say a drum word, so it has no way to answer "not a drum" —
+#: softmax must pick one of ten. Applied to a whole library it therefore labels
+#: everything, confidently. Measured on the first run: 13,697 files tagged, including
+#: `Rave Synth Chord Em.wav` as a tom at 0.98 and a rack preset as a kick at 1.00.
+#:
+#: The fix is a division of labour rather than a better classifier. AudioSet CAN say
+#: "this is percussion" — that is a class it has — and cannot say WHICH drum, which is
+#: exactly the hole this module fills. So AudioSet gates, and this names. Together with
+#: the one-shot test that is two independent signals, and it took 13,697 down to 7,409.
+#:
+#: An EXPLICIT list, never a LIKE pattern: `%rum%` matches "inst-rum-ent", which put
+#: "Musical instrument", "Brass instrument" and "Plucked string instrument" into a list
+#: of percussion on the first attempt.
+PERCUSSIVE_EVENTS = (
+    "Percussion", "Drum kit", "Drum machine", "Drum", "Snare drum", "Bass drum",
+    "Cymbal", "Hi-hat", "Rimshot", "Wood block", "Tabla", "Tambourine", "Maraca",
+    "Timpani", "Gong", "Clapping", "Drum roll", "Electronic drum", "Cowbell",
+    "Bongo", "Conga", "Steelpan", "Crash cymbal", "Ride cymbal", "Hand clap",
+    "Finger snapping", "Castanets", "Snare", "Tom-tom", "Sizzle cymbal",
+)
 #: Do not record a verdict weaker than this. At 0.5 the classifier is 83% right; below
 #: it the label is a guess wearing a number.
 MIN_CONFIDENCE = 0.5
@@ -205,9 +227,21 @@ def apply_to_index(db_path: Path, model: dict,
     """
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys=ON")
+    # Ask the gate FIRST, in SQL, so the classifier is never even shown a synth pad.
+    # See PERCUSSIVE_EVENTS for why this is not optional.
+    placeholders = ",".join("?" for _ in PERCUSSIVE_EVENTS)
     rows = conn.execute(
-        "SELECT f.id, f.duration_sec, e.vector, e.dim FROM files f "
-        "JOIN embeddings e ON e.file_id = f.id WHERE f.error IS NULL").fetchall()
+        f"""SELECT f.id, f.duration_sec, e.vector, e.dim FROM files f            -- noqa: S608
+            JOIN embeddings e ON e.file_id = f.id
+            LEFT JOIN properties p ON p.file_id = f.id
+            WHERE f.error IS NULL
+              AND (p.kind IS NULL OR p.kind = 'one_shot')
+              AND EXISTS (SELECT 1 FROM tags a WHERE a.file_id = f.id
+                          AND a.namespace = 'audio_event'
+                          AND a.label IN ({placeholders}))""",
+        PERCUSSIVE_EVENTS).fetchall()
+    total = conn.execute(
+        "SELECT COUNT(*) FROM files WHERE error IS NULL").fetchone()[0]
     conn.execute("DELETE FROM tags WHERE namespace = ?", (NAMESPACE,))
     written = skipped_long = 0
     batch = []
@@ -227,4 +261,4 @@ def apply_to_index(db_path: Path, model: dict,
     conn.commit()
     conn.close()
     return {"tagged": written, "skipped_too_long": skipped_long,
-            "considered": len(rows)}
+            "passed_gate": len(rows), "in_index": total}

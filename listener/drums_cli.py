@@ -58,9 +58,10 @@ def main(argv=None) -> int:
             print("no trained model — run --train first", file=sys.stderr)
             return 1
         result = drums.apply_to_index(args.db, model, args.min_confidence)
-        print(f"\ntagged {result['tagged']:,} files as drums "
-              f"(of {result['considered']:,} with embeddings; "
-              f"{result['skipped_too_long']:,} skipped as too long to be one-shots)")
+        print(f"\ntagged {result['tagged']:,} files as drums")
+        print(f"  {result['passed_gate']:,} of {result['in_index']:,} files passed the "
+              f"gate — a one-shot AND percussive per AudioSet")
+        print(f"  {result['skipped_too_long']:,} of those were still too long")
     return 0
 
 

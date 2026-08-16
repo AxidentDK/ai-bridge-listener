@@ -76,34 +76,70 @@ def test_probabilities_are_probabilities():
     assert (probs >= 0).all()
 
 
+def _index_with(tmp, files):
+    """files: [(name, duration, audio_event_or_None)]"""
+    path = os.path.join(tmp, "index.db")
+    store = Store(path, "test-1")
+    rng = np.random.RandomState(2)
+    for name, duration, event in files:
+        tags = [("audio_event", event, 0.5, "yamnet")] if event else None
+        store.record(name, size=1, mtime=1.0, duration=duration, tags=tags,
+                     properties={"kind": "one_shot" if duration < 3 else "loop"},
+                     embedding=rng.randn(8).astype(np.float32))
+    store.commit()
+    store.close()
+    return path
+
+
+def test_a_non_percussive_sound_is_never_labelled_a_drum():
+    """THE bug this gate exists for. The classifier is CLOSED-SET — trained only on
+    drum names, so softmax must pick one of ten and it cannot answer "not a drum".
+    Applied ungated to the library it tagged 13,697 files, including a synth chord as a
+    tom at 0.98 and a rack preset as a kick at 1.00.
+
+    AudioSet can say "this is percussion" and cannot say WHICH drum; this module is the
+    reverse. So AudioSet gates, and this names."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _index_with(tmp, [
+            ("kick.wav", 0.4, "Bass drum"),          # percussive: allowed through
+            ("pad.wav", 0.4, "Synthesizer"),         # not percussive: must be refused
+            ("chord.wav", 0.4, None),                # no event at all: refused
+        ])
+        rng = np.random.RandomState(3)
+        model = drums.fit(rng.randn(60, 8).astype(np.float32),
+                          rng.randint(0, len(drums.CLASSES), size=60), epochs=50)
+        result = drums.apply_to_index(path, model, min_confidence=0.0)
+        assert result["passed_gate"] == 1, result
+        assert result["tagged"] == 1, result
+
+        conn = sqlite3.connect(path)
+        tagged = conn.execute(
+            "SELECT f.path FROM tags t JOIN files f ON f.id = t.file_id "
+            "WHERE t.namespace = ?", (drums.NAMESPACE,)).fetchall()
+        assert [r[0] for r in tagged] == ["kick.wav"], tagged
+        conn.close()
+
+
 def test_applying_to_an_index_writes_only_confident_verdicts_and_no_loops():
     """Tags are replaced wholesale, long files are left alone (a 4-bar loop in Kicks/
     is a loop that features kicks, not a kick sample), and nothing is written below the
     confidence floor."""
     with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "index.db")
-        store = Store(path, "test-1")
+        path = _index_with(tmp, [(f"{i}.wav", 0.4 if i < 4 else 30.0, "Percussion")
+                                 for i in range(6)])
         rng = np.random.RandomState(2)
-        for i in range(6):
-            store.record(f"{i}.wav", size=i, mtime=float(i),
-                         duration=0.4 if i < 4 else 30.0,
-                         embedding=rng.randn(8).astype(np.float32))
-        store.commit()
-        store.close()
-
         X = rng.randn(60, 8).astype(np.float32)
         y = rng.randint(0, len(drums.CLASSES), size=60)
         model = drums.fit(X, y, epochs=50)
 
         result = drums.apply_to_index(path, model, min_confidence=0.0)
-        assert result["skipped_too_long"] == 2, result
         assert result["tagged"] == 4, result
 
         conn = sqlite3.connect(path)
         rows = conn.execute(
-            "SELECT namespace, label, confidence, model FROM tags").fetchall()
+            "SELECT namespace, label, confidence, model FROM tags "
+            "WHERE namespace = ?", (drums.NAMESPACE,)).fetchall()
         assert len(rows) == 4
-        assert {r[0] for r in rows} == {drums.NAMESPACE}
         assert all(r[1] in drums.CLASSES for r in rows)
         assert all(0.0 <= r[2] <= 1.0 for r in rows)
         assert {r[3] for r in rows} == {drums.MODEL_NAME}
