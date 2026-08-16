@@ -20,14 +20,21 @@ read, the FILENAME WINS when the two disagree (it is consistently the more speci
 the two in this library), and genuine contradictions are DROPPED rather than trained on.
 Better 4,000 clean examples than 10,000 noisy ones.
 
-Measured on a stratified 20% held-out split, 3,999 labelled files:
+Measured over FIVE seeds on a stratified 20% held-out split, 4,345 labelled files —
+five rather than one because the thin classes swing by 10 points between splits and a
+single number there is a coin toss reported as a measurement:
 
-    overall 81%      kick 94%   hat 90%   tom 87%   snare 82%
-                     crash 79%  clap 71%  perc 62%  ride 60%  rim 59%  shaker 31%
+    overall 81.1% +/- 1.2
+
+    kick 91+/-1   hat 87+/-2   tom 87+/-3   snare 83+/-3   ride 81+/-3
+    clap 75+/-3   crash 74+/-4  perc 70+/-4  rim 44+/-11  shaker 35+/-6
 
 The confusions are the ones a person would make on a single hit — shaker with hi-hat,
 rim with snare, tom with kick — and the thin classes are thin because the library holds
 only 65 shakers to learn from, not because the model is confused about what a shaker is.
+Note the spreads before reading anything into rim and shaker: at 34 and 13 test files
+they cannot support a conclusion, and any change of under about 15 points in those two
+is noise.
 
 Confidence is honest here, which is not something to assume: at >= 0.9 it is 91%
 correct, against 81% overall. So a caller can trade recall for precision and get what
@@ -66,9 +73,21 @@ CLASS_PATTERNS = {
 CLASSES = sorted(CLASS_PATTERNS)
 _COMPILED = {name: re.compile(rx, re.I) for name, rx in CLASS_PATTERNS.items()}
 
-#: Above this a file is a loop that FEATURES kicks, not a kick sample. A drum one-shot
-#: is short; three seconds is generous for one and short for a bar of anything.
-MAX_ONE_SHOT_SECONDS = 3.0
+#: A BACKSTOP, not the loop test — `kind` is the loop test, and it is applied in both
+#: `training_set` and `apply_to_index` so the two cannot disagree about what they are
+#: looking at.
+#:
+#: This was 3.0 s and doing the loop test on its own, which quietly threw away the
+#: cymbals: a crash rings for 5-8 seconds and a ride longer still. Measured against the
+#: names in this library, the old cap excluded 63.8% of everything called a ride and
+#: 47.7% of everything called a crash, against 2-7% of kicks, snares and hats. The
+#: model was therefore trained on the short, atypical cymbals and asked about the rest.
+#:
+#: Raising it only works together with the `kind` filter, and the pairing is not
+#: cosmetic — measured over five seeds, 15 s WITHOUT the filter scores 80.1% overall
+#: and 15 s WITH it scores 81.1%, because the longer window otherwise fills up with
+#: four-bar loops. Gemini predicted exactly that interaction before it was run.
+MAX_ONE_SHOT_SECONDS = 15.0
 
 #: THE GATE, and the reason it exists. This is a CLOSED-SET classifier: it was trained
 #: only on files whose names say a drum word, so it has no way to answer "not a drum" —
@@ -120,13 +139,25 @@ def _embedding(blob: bytes, dim: int) -> np.ndarray:
 
 
 def training_set(db_path: Path) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """(X, y, paths) for every file whose name states a class unambiguously."""
+    """(X, y, paths) for every file whose name states a class unambiguously.
+
+    The `kind` filter matters and used to be missing here while `apply_to_index` had
+    it: training saw whatever fitted under the duration cap, including 2.5-second loops
+    like "Acid Kick.nksf.ogg" and "Hat Sequence.nksf.ogg". Only 1.4% of the training set
+    (57 of 3,999), so it was not what held the scores down — but the two functions
+    disagreeing about what a drum one-shot IS meant the model was trained on one
+    population and applied to another, and that is the kind of gap that grows.
+    """
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     vectors, labels, paths = [], [], []
-    for path, duration, blob, dim in conn.execute(
-            "SELECT f.path, f.duration_sec, e.vector, e.dim FROM files f "
-            "JOIN embeddings e ON e.file_id = f.id WHERE f.error IS NULL"):
+    for path, duration, blob, dim, kind in conn.execute(
+            "SELECT f.path, f.duration_sec, e.vector, e.dim, p.kind FROM files f "
+            "JOIN embeddings e ON e.file_id = f.id "
+            "LEFT JOIN properties p ON p.file_id = f.id WHERE f.error IS NULL"):
         if duration and duration > MAX_ONE_SHOT_SECONDS:
+            continue
+        # NULL kind means the file has no properties row at all, not that it is a loop.
+        if kind is not None and kind != "one_shot":
             continue
         label = label_from_path(path)
         if label is None:

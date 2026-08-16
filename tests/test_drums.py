@@ -153,6 +153,52 @@ def test_applying_to_an_index_writes_only_confident_verdicts_and_no_loops():
         conn.close()
 
 
+
+def test_training_and_application_agree_on_what_a_one_shot_is():
+    """They used to disagree, and that is the kind of gap that grows.
+
+    `apply_to_index` filtered on `kind`; `training_set` filtered on duration alone, so
+    a 2.5-second loop called "Acid Kick" was trained on and then never seen again at
+    apply time. Small in itself — 57 of 3,999 files — but a model trained on one
+    population and applied to another has no way to tell you it is doing so.
+
+    Both now filter on `kind`, and duration is only a backstop.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _index_with(tmp, [
+            ("Kick 01.wav", 0.4, "Bass drum"),        # a real one-shot
+            ("Kick Loop.wav", 2.5, "Bass drum"),      # a LOOP, short enough to sneak in
+            ("Ride 01.wav", 8.0, "Cymbal"),           # a long cymbal: must be kept
+        ])
+        # _index_with marks anything under 3 s as a one_shot, so force the loop's kind
+        # to what a real scan would have recorded for it.
+        conn = sqlite3.connect(path)
+        conn.execute("UPDATE properties SET kind='loop' WHERE file_id = "
+                     "(SELECT id FROM files WHERE path='Kick Loop.wav')")
+        conn.execute("UPDATE properties SET kind='one_shot' WHERE file_id = "
+                     "(SELECT id FROM files WHERE path='Ride 01.wav')")
+        conn.commit()
+        conn.close()
+
+        _X, _y, paths = drums.training_set(path)
+        assert "Kick Loop.wav" not in paths, "a loop reached the training set"
+        assert "Kick 01.wav" in paths
+        assert "Ride 01.wav" in paths, (
+            "an 8-second ride was excluded — the old 3 s cap dropped 63.8% of the "
+            "rides in the library this way")
+
+
+def test_a_cymbal_is_long_enough_to_survive_the_duration_backstop():
+    """The measurement that moved the cap: a crash rings 5-8 s and a ride longer.
+
+    At 3.0 s the backstop excluded 63.8% of everything named ride and 47.7% of
+    everything named crash, against 2-7% of kicks, snares and hats — so the model
+    learned cymbals from the short and atypical ones.
+    """
+    assert drums.MAX_ONE_SHOT_SECONDS >= 8.0, (
+        "a ride cymbal does not fit under this cap")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
