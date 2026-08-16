@@ -16,6 +16,99 @@ commit messages, and nobody reconstructs the story from those six months later.
 
 ---
 
+## 2026-08-16 afternoon — a real conversation with Gemini, and three bugs it found
+
+The morning's review was one-shot: send a module, get an answer. The afternoon's was a
+conversation, which changed what was possible — each side could challenge the other's
+reasoning and be shown data in reply. Full transcripts in the bridge's
+`gemini_reviews/`; attribution in its `docs/REVIEW_LOG.md`, both columns filled in.
+
+### The tooling that made it possible
+
+`tools/gemini_chat.py` in the bridge repo — a Tkinter chat window with the conversation
+kept, the model chosen from a dropdown filled by what the key can actually reach, the
+key pasted into a dialog rather than typed into a file, and the session logged to disk
+**after every exchange** rather than at the end. Transport, retries and the architecture
+preamble moved into `gemini_client.py`, shared with `ask_gemini.py` rather than copied —
+the same lesson as the DSP core, applied the same day.
+
+Two behaviour changes a window forced, both of which the CLI wanted anyway: errors raise
+`GeminiError` instead of `SystemExit` (which inherits from `BaseException` and would
+slip past `except Exception` in a worker thread and kill the interpreter), and an
+exhausted quota fails immediately instead of burning 155 seconds of backoff to reach the
+same failure with a vaguer message.
+
+### Bug 1 — the key estimator was transposing bass up a perfect fifth
+
+**Gemini found this from a constant, before either of us had measured anything.** The
+chroma band started at 55 Hz. A square wave has no even harmonics, and saturation — what
+makes a sub audible on a phone speaker — generates odd ones. So for a square sub at C1
+the fundamental fell outside the band, the second harmonic does not exist, and the
+loudest survivor was the **third harmonic, a fifth above the root**. Measured: C1→G,
+D1→A, D#1→A#, F1→C, G1→D. Every one a fifth up, confidently, with nothing to say a note
+had been discarded.
+
+Sawtooth basses were fine throughout, which is why it hid for months — a saw has a
+second harmonic, and an octave is the same pitch class.
+
+Band now starts at A0. Sub-bass errors fall from 11/15 to 1/15 on sines and 13/15 to
+1/15 on squares; the range from C2 up is untouched, 0 errors in 60 notes at every floor
+tested. I had argued against lowering it on resolution grounds and was simply wrong —
+the coarseness stays where it is bought and does not leak upward.
+
+### Bug 2 — 27% of brightness labels, broken that same morning by me
+
+Chasing a Gemini claim that turned out to be **wrong** is what found this. He predicted
+16 kHz analysis would flatten cymbal timbre; measured on 196 drum one-shots it slightly
+*improves* class separation (0.583→0.650). But measuring absolute centroids to test that
+showed the shared-DSP swap had moved the bridge's centroid onto 16 kHz while leaving its
+Hz thresholds untouched: **27% of 500 files relabelled, "very bright" down 75%.**
+
+Fixed by measuring brightness on `prepared.source` at native rate — which Gemini
+correctly pointed out is not an exception to rule 1 but the documented use of the escape
+hatch that stereo width and loudness already use.
+
+*A wrong hypothesis that aims a measurement at the right place beats a right one that
+does not.*
+
+### Bug 3 — the drum classifier was deleting its own cymbals
+
+`MAX_ONE_SHOT_SECONDS = 3.0` excluded **63.8% of everything named ride** and 47.7% of
+crashes, against 2–7% of kicks, snares and hats: a crash rings 5–8 s and a ride longer.
+Gemini read the constant and named the class it was destroying. He also predicted the
+cap could not be raised without first filtering loops by `kind`, and the 2×2 confirmed
+it exactly (15 s alone 80.1%, 15 s with the filter 81.1%).
+
+Tags refreshed afterwards: **5,429 → 6,712**, ride 131→432, crash 85→186. Stable rather
+than churned — 5,151 files kept their label, 149 changed one.
+
+### What was refuted, and it matters that it was tested
+
+Gemini's most plausible hypothesis — that a style-trained embedding is blind to the
+envelope distinctions separating shaker from hat and rim from snare, and that appending
+the scan's stored scalars would recover them — is **wrong**: +0.4 points, inside noise,
+with shaker and rim unmoved. His diagnosis of EffNet may still be right; these scalars
+are not the cure. Also refuted: his flux-floor claim (the floor keeps 95.1% of onsets)
+and his proposed chroma patch, which swapped `min` for `max` and would have analysed a
+30-second loop with a 16-second window.
+
+### Method change worth keeping
+
+**Everything moved to five seeds.** A single split reported ride going 60% → 84%; five
+report 77±10 → 81±3. The thin classes swing ten points between splits, and the real gain
+was never the mean — it was the spread collapsing as the test set went from 15 files to
+38. Single-seed per-class numbers in this project should not be trusted.
+
+### And a lesson about my own housekeeping
+
+A scratch script from 13:18, `gate_test.py`, was found at 16:30 still pegging a full CPU
+core — 191 minutes of it — on a correlated `EXISTS` subquery over 1.37M tags. Its answer
+had been obtained another way and committed hours earlier. It was read-only so nothing
+was at risk, but it was invisible: a background process that *hangs* rather than crashes
+produces no error and no notification. Kim spotted the load, not me.
+
+---
+
 ## 2026-08-16 — one DSP core for two programs, and a drum classifier that can say "no"
 
 Two days of measurement bugs had one shape in common, so the day was spent on the shape

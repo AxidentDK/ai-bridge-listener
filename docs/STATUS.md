@@ -5,7 +5,12 @@ a session ended**, so the next session had to reconstruct it from git log, a SQL
 file, and eventually the raw transcript. **Update it at the end of a session, even when
 everything is green** — "nothing is blocked" is itself worth writing down.
 
-Last updated: **2026-08-16**, after the shared-DSP extraction and the drum classifier.
+Last updated: **2026-08-16, end of day** — after the shared-DSP extraction, the drum
+classifier, a full conversational review with Gemini, and a drum-tag refresh.
+
+**Nothing is running, nothing is blocked, both repos are green and pushed.** The one
+deliberate loose end is the re-scan, described below. If you are picking this up cold,
+read that section and `docs/PROGRESS.md`'s top two entries and you are current.
 
 ---
 
@@ -13,7 +18,7 @@ Last updated: **2026-08-16**, after the shared-DSP extraction and the drum class
 
 | | |
 |---|---|
-| `ai-bridge-listener` | **56 tests passing** — features 19, shared_dsp 18, drums 11, db 5, sync 3 |
+| `ai-bridge-listener` | **56 passing** — features 19, shared_dsp 18, drums 11, db 5, sync 3 |
 | `ai-bridge-for-ableton-live` | **133 tests passing**, incl. the same 3 sync tests |
 | Index | **29,870 files, 1,369,646 tags, 29,869 properties, ZERO orphans** |
 | Index analyzer | `mel2+feat5+discogs-effnet-1+25heads-2+yamnet-1(k15,f0.02)` |
@@ -122,6 +127,15 @@ was the hole the obvious `(array, rate)` API would have left open.
 * **The `feat7` re-scan**, deferred deliberately — see above.
 * **Agent tool-calling in Live** — the sidecar's search tools have never been exercised
   end to end from an agent inside a real session.
+* **rim (44 ± 11) and shaker (35 ± 6)** in the drum classifier, left open ON PURPOSE:
+  at 34 and 13 test files nothing proposed for them is falsifiable with this library.
+  Not to be tuned until a pack brings the counts up.
+* **The 3rd-harmonic story is verified on SYNTHESIS, not on the library.** 2% of real
+  bass loops change key with the new floor, but there is no ground truth saying those
+  changes are toward the truth. Gemini predicted the change-interval histogram would
+  spike at a perfect fifth down; measured on 400 real loops it spikes at a **major
+  third** (10 of 23) rather than a fifth (4). Both are odd-harmonic intervals so the
+  mechanism survives, but the specific prediction failed and n is small.
 
 ## ✅ DONE — Phase B, the drum classifier
 
