@@ -210,7 +210,15 @@ class Store:
             "SELECT id FROM files WHERE path=?", (path,)).fetchone()["id"]
 
         # Replace rather than merge: a re-analysis supersedes the previous verdict.
+        # ALL of it, including the derived rows that a failed re-analysis produces
+        # none of. Only tags were cleared here, so a file that decoded last time and
+        # fails this time kept its old properties and its old embedding while its tags
+        # vanished — a row describing audio the analyser can no longer read, with
+        # nothing to say it is stale.
         self.conn.execute("DELETE FROM tags WHERE file_id=?", (file_id,))
+        if error:
+            self.conn.execute("DELETE FROM properties WHERE file_id=?", (file_id,))
+            self.conn.execute("DELETE FROM embeddings WHERE file_id=?", (file_id,))
         if tags:
             self.conn.executemany(
                 "INSERT OR REPLACE INTO tags(file_id, namespace, label, confidence, "

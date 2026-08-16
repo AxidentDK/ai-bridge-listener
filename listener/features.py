@@ -38,7 +38,9 @@ import numpy as np
 #:         pitch support check (bass notes had no bin within a semitone), decay
 #:         bounded at the next onset, metrical rivals looked up outside the tempo
 #:         search window, and a prior width chosen on the WORST tempo band.
-FEATURE_VERSION = "feat4"
+#: feat5 = chroma resolved with a LONGER window (an octave of bass held 3 bins) and
+#:         averaged per pitch class; key refused when the histogram is too flat.
+FEATURE_VERSION = "feat5"
 
 ANALYSIS_SR = 16000          # the mel pass already produced this; reuse it
 
@@ -114,6 +116,12 @@ _NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 _MAJOR = (6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)
 _MINOR = (6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17)
 _CHROMA_MIN_HZ, _CHROMA_MAX_HZ = 55.0, 5000.0
+#: Chroma alone uses a longer window — see ``chroma_of``. 16384 at 16 kHz is 1.02 s
+#: and just under 1 Hz per bin, which separates semitones to the bottom of a piano.
+_CHROMA_FFT = 16384
+#: How peaked a pitch-class histogram must be before a key is claimed. Noise measures
+#: ~0.07 through a corrected chroma; a held note approaches 1.0.
+_MIN_TONAL_CONTRAST = 0.25
 
 
 def _frames(x: np.ndarray, n_fft: int, hop: int, max_frames: int | None = None):
@@ -455,8 +463,17 @@ def spectral_flatness(mono: np.ndarray) -> float:
 
 
 def key_from_chroma(chroma: list[float]) -> dict:
-    """Krumhansl-Schmuckler, ported so both programs mean the same thing by 'F minor'."""
+    """Krumhansl-Schmuckler, ported so both programs mean the same thing by 'F minor'.
+
+    Refuses to answer when the histogram is too FLAT to carry a key. Correlation
+    against 24 profiles always yields a winner, and it is scale-invariant — which
+    means it cannot distinguish a flat distribution from a peaked one, and noise came
+    back as a confident key. A tonal signal concentrates energy in a few classes.
+    """
     if not any(chroma):
+        return {}
+    peak = max(chroma)
+    if peak > 0 and (peak - min(chroma)) / peak < _MIN_TONAL_CONTRAST:
         return {}
     scored = []
     for root in range(12):
@@ -482,17 +499,36 @@ def _correlate(hist, profile) -> float:
 
 
 def chroma_of(mono: np.ndarray, sr: int = ANALYSIS_SR) -> list[float]:
-    frames = _frames(mono, _WIDTH_FFT, _WIDTH_HOP, _WIDTH_MAX_FRAMES)
+    """12 pitch classes, resolved low enough to see a bass note.
+
+    Uses a LONGER window than the rest of the analysis. At 2048 samples the bins are
+    7.8 Hz apart here, so the octave from A1 to A2 holds about seven of them — twelve
+    pitch classes cannot be separated inside seven bins, and the bottom octave of a
+    bass line is invisible to key detection. Zero-padding does not help: it
+    interpolates the same smeared peak. Only a longer window buys real resolution.
+
+    Each class is then AVERAGED over its bins rather than summed. Linear bins are even
+    in Hz while pitch classes are even in log frequency, so a high class covers far
+    more bins than a low one — summing measured bin count as much as music, which is
+    how white noise came back as a confident D minor.
+    """
+    n_fft = min(_CHROMA_FFT, max(_WIDTH_FFT,
+                                 1 << int(np.floor(np.log2(max(len(mono), _WIDTH_FFT))))))
+    frames = _frames(mono, n_fft, n_fft // 2, _WIDTH_MAX_FRAMES)
     if not len(frames):
         return [0.0] * 12
     spec = np.abs(np.fft.rfft(frames, axis=1))
-    freqs = np.fft.rfftfreq(_WIDTH_FFT, 1.0 / sr)
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
     usable = (freqs > _CHROMA_MIN_HZ) & (freqs < _CHROMA_MAX_HZ)
     if not usable.any():
         return [0.0] * 12
     pcs = np.round(12 * np.log2(freqs[usable] / 440.0) + 69).astype(int) % 12
     weights = spec[:, usable].sum(axis=0)
-    return [float(weights[pcs == pc].sum()) for pc in range(12)]
+    out = []
+    for pc in range(12):
+        sel = pcs == pc
+        out.append(float(weights[sel].mean()) if sel.any() else 0.0)
+    return out
 
 
 #: Tempo search range, and the prior it is weighted toward. Autocorrelation is
