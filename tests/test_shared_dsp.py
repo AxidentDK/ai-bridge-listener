@@ -509,6 +509,62 @@ def test_metrical_rivals_are_visible_outside_the_tempo_search_window():
     acf[76] = 0.95                       # a strong half-time rival, outside 60-190 BPM
     assert S._metrical_margin(acf, 38) < 0.1, "a rival outside the window must count"
 
+
+def test_a_square_wave_sub_is_not_transposed_up_a_fifth():
+    """The bug the chroma band's lower edge used to cause, in its exact form.
+
+    A square wave has no even harmonics, and saturation — what makes a sub audible on a
+    phone speaker — generates odd ones. With the band starting at 55 Hz the fundamental
+    of a C1 sub fell outside it, the second harmonic does not exist, and the loudest
+    survivor was the third: a fifth above the root. C1 read G, D1 read A, F1 read C.
+    Confidently, every time, with nothing to say a note had been discarded.
+    """
+    sr = S.ANALYSIS_SR
+    names = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+    for midi in (24, 26, 27, 29, 31):                      # C1 to G1
+        hz = 440.0 * 2 ** ((midi - 69) / 12)
+        t = np.arange(int(2.0 * sr)) / sr
+        wave = np.zeros_like(t)
+        for k in range(1, 40, 2):                          # odd harmonics only
+            if hz * k < sr / 2:
+                wave += np.sin(2 * np.pi * hz * k * t) / k
+        wave = (wave / np.abs(wave).max() * 0.5).astype(np.float32)
+        got = names[int(np.argmax(S.chroma_of(wave)))]
+        assert got == names[midi % 12], (
+            f"square sub on {names[midi % 12]}1 read as {got}")
+
+
+def test_the_chroma_window_does_not_depend_on_file_length():
+    """It used to shrink to the power of two below the signal length, so a 1.9 s file
+    and a 2.1 s file were analysed differently — an arbitrary discontinuity no reader
+    would predict from the code. The fix buys little accuracy (one case in 252) and it
+    buys determinism, which is the part worth pinning."""
+    sr = S.ANALYSIS_SR
+    winners = set()
+    for seconds in (0.4, 0.9, 1.9, 2.1, 5.0):
+        t = np.arange(int(seconds * sr)) / sr
+        tone = (np.sin(2 * np.pi * 220.0 * t) * 0.5).astype(np.float32)
+        winners.add(int(np.argmax(S.chroma_of(tone))))
+    assert len(winners) == 1, f"the same note read as {len(winners)} pitch classes"
+
+
+def test_the_range_above_C2_is_untouched_by_the_lowered_floor():
+    """The cost side of that trade, measured rather than assumed. Lowering the band's
+    edge to 27.5 Hz makes the bottom octave coarse; it must not disturb the range that
+    already worked, which is most of a sample library."""
+    sr = S.ANALYSIS_SR
+    names = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+    wrong = []
+    for midi in range(36, 84):                             # C2 to B5
+        hz = 440.0 * 2 ** ((midi - 69) / 12)
+        t = np.arange(int(2.0 * sr)) / sr
+        tone = (np.sin(2 * np.pi * hz * t) * 0.5).astype(np.float32)
+        got = names[int(np.argmax(S.chroma_of(tone)))]
+        if got != names[midi % 12]:
+            wrong.append(f"{names[midi % 12]}->{got}")
+    assert not wrong, f"{len(wrong)} of 48 notes above C2 misread: {wrong[:5]}"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

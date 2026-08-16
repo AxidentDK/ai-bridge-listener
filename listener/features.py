@@ -58,7 +58,13 @@ from . import shared_dsp
 #:         the mono signal these measurements see comes from its resampler rather than
 #:         soxr. That moves a handful of values (2 of 42 tempos by 0.1 BPM), which is
 #:         exactly why it needs a version of its own.
-FEATURE_VERSION = "feat6"
+#: feat7 = the chroma band starts at A0 instead of A1. A square or saturated sub has no
+#:         even harmonics, so with the old floor its fundamental was discarded and the
+#:         loudest survivor was the THIRD harmonic — every such bassline named a perfect
+#:         fifth above its true root. 2% of real bass loops change key; the range from
+#:         C2 up is untouched. Found with Gemini, who named the mechanism from the
+#:         constant alone.
+FEATURE_VERSION = "feat7"
 
 # --- pitch: the one measurement the bridge has no counterpart for --------------------
 
