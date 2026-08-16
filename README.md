@@ -18,7 +18,8 @@ it, you can search by **what things sound like**.
 `numpy`, `onnxruntime`, `soundfile`, `soxr`. That's it — **about 20 MB**.
 
 **No TensorFlow, no Essentia, no CUDA, no WSL, no GPU.** It runs on a six-year-old
-laptop CPU at ~26 files/second, which is roughly 14 minutes for 22,000 files. Plain
+laptop CPU at ~7.7 files/second with the full measurement pass — about 65 minutes for
+the 29,870-file library here. Plain
 `onnxruntime` contains no GPU code at all, so there is nothing to configure.
 
 That is possible because of two things. The expensive part — the Discogs-EffNet
@@ -114,16 +115,52 @@ the first hit, so a caller can correct MIDI placement for a sample with a slow r
 The 1280-dim embedding each file's tags came from is stored as float16, so a classifier
 can be trained on the library without decoding it again.
 
+### Naming drums — the vocabulary AudioSet does not have
+
+**AudioSet has no `kick` class and no `tom` class.** Not "weak at them": the labels do
+not exist, so no amount of better audio analysis can produce them. `listener/drums.py`
+trains a small softmax regression on those stored embeddings to supply the ten words a
+producer actually browses by — kick, snare, clap, hat, ride, crash, tom, rim, shaker,
+perc. It decodes nothing, so it trains and labels the whole library in seconds:
+
+```sh
+python -m listener.drums_cli --train --apply
+```
+
+Labels come from the library itself — a file in `Kicks/` called `Kick 08.wav` is a kick
+— with the filename beating the folder and genuine contradictions dropped rather than
+guessed. Held out over five seeds: **81% overall, 93% at confidence ≥ 0.9**, tagging
+6,712 files.
+
+> ⚠️ **A closed-set classifier cannot say "not a drum".** Softmax must pick one of ten,
+> so applied ungated it labelled 13,697 files including synth chords at 0.98 confidence.
+> That is structural, not a threshold to tune. AudioSet *can* say "this is percussion"
+> and cannot say which drum; this can say which drum and cannot say whether it is one.
+> So AudioSet gates and this names — and the gate is not optional.
+
+The thin classes are honest about themselves: `rim` scores 44% ± 11 and `shaker` 35% ± 6
+on 34 and 13 test files, which is too few to conclude anything from. Per-class figures
+here are reported over five splits because a single split moved them by ten points.
+
+### One DSP core, two programs
+
+`listener/shared_dsp.py` owns every measurement above — onsets, tempo, chroma, key
+scoring, envelope, stereo, loudness — and the bridge holds a **byte-identical copy**,
+checked by SHA-256 in both test suites. It is not a convention: the same measurement bug
+appeared in both programs three times in one night, once with the paragraph explaining
+it copied across intact. If you are changing measurement code, change it there and copy
+the whole file; the suites fail if the two drift.
+
 ### How good are the measurements?
 
 Filenames are again the ground truth, and again noisy — but a file called
 `Drumloop 11 170BPM.wav` is a real claim about itself. Measured across the whole
-**29,869-file** index:
+**29,870-file** index:
 
 | | |
 |---|---|
 | Tempo within 2.5 BPM of the stated one (n=546) | **69%** |
-| Pitch class matching a note named in the filename (n=3,671) | **74%** |
+| Pitch class matching a note named in the filename (n=3,671) | **75%** |
 
 **Octave errors are counted as errors.** That is deliberate. Scoring 85 BPM as "right"
 for a 170 BPM loop would lift the figure well above this — but they are not the same
