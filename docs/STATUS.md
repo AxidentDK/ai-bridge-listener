@@ -13,11 +13,11 @@ Last updated: **2026-08-16**, after the shared-DSP extraction and the drum class
 
 | | |
 |---|---|
-| `ai-bridge-listener` | **51 tests passing** — features 19, shared_dsp 15, drums 9, db 5, sync 3 |
-| `ai-bridge-for-ableton-live` | **118 tests passing**, incl. the same 3 sync tests |
+| `ai-bridge-listener` | **56 tests passing** — features 19, shared_dsp 18, drums 11, db 5, sync 3 |
+| `ai-bridge-for-ableton-live` | **133 tests passing**, incl. the same 3 sync tests |
 | Index | **29,870 files, 1,369,646 tags, 29,869 properties, ZERO orphans** |
 | Index analyzer | `mel2+feat5+discogs-effnet-1+25heads-2+yamnet-1(k15,f0.02)` |
-| Code analyzer | **`feat6`** — see "the one outstanding re-scan" below |
+| Code analyzer | **`feat7`** — see "the one outstanding re-scan" below |
 | DSP core | `shared_dsp.py`, byte-identical in both repos, SHA-256 checked by both suites |
 | Drum labels | **6,712** files in the `drum` namespace, refreshed 2026-08-16 after the cymbal fix |
 
@@ -49,15 +49,20 @@ disables it per connection by default, so every `REFERENCES` clause was decorati
 
 ## The one outstanding re-scan — DEFERRED ON PURPOSE
 
-The code is on **`feat6`**; the index is on **`feat5`**. Kim's instruction on 2026-08-16
-was *"build but wait doing the rescan"*, so the swap landed and the scan did not.
+The code is on **`feat7`**; the index is on **`feat5`**. Kim's instruction on 2026-08-16
+was *"build but wait doing the rescan"*, so the changes landed and the scan did not.
 
-What `feat6` changes is smaller than the version bump suggests: **the maths is
+`feat6` changes less than the version bump suggests: **the maths is
 identical** — proven bit-for-bit against `feat5` on 120 real files — but it now runs on
 audio from the shared Kaiser resampler rather than soxr, and a few values move with the
 samples (2 of 42 tempos by 0.1 BPM). The one substantive change is `attack_ms`, which
 was unstable on sustained one-shots and is now stable; roughly 2% of one-shots have a
 stored attack worth distrusting until the scan runs.
+
+`feat7` is the one with real content: the chroma band now starts at A0 instead of A1,
+which stops square and saturated basslines being named a perfect fifth above their root.
+**Stored `key` values for bass material are wrong until the scan runs** — measured at
+about 2% of real bass loops, but wrong in a musically severe way where it lands.
 
 Everything else — tags, key, pitch, tempo, stereo, loudness, drum labels — is current
 and correct. **Nothing is blocked by this.** A full re-scan takes about 65 minutes.
@@ -114,7 +119,7 @@ was the hole the obvious `(array, rate)` API would have left open.
   chord / inharmonic). 9/9 synthetic, unreliable on real material (1 of 5 real chords
   routed right). The blocker is a per-file overlap: a real note scores 0.685 and a real
   chord 0.681.
-* **The `feat6` re-scan**, deferred deliberately — see above.
+* **The `feat7` re-scan**, deferred deliberately — see above.
 * **Agent tool-calling in Live** — the sidecar's search tools have never been exercised
   end to end from an agent inside a real session.
 
@@ -148,8 +153,7 @@ and takes seconds.
 The thing worth remembering: the first run labelled **13,697 files**, including synth
 chords at 0.98 confidence. That is not a threshold to tune — a closed-set softmax must
 pick a class and cannot answer "none of the above". Gating on AudioSet percussion events
-plus the one-shot property brought it to **5,429**, which is in the index now. Retrain
-or re-apply with `python -m listener.drums_cli --train` / `--apply`.
+plus the one-shot property is what makes the number above trustworthy.
 
 ## The review process
 
