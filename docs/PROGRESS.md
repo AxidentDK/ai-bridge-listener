@@ -16,6 +16,49 @@ commit messages, and nobody reconstructs the story from those six months later.
 
 ---
 
+## 2026-08-18 — two silent failures from the re-scan, found at the real entry point
+
+Both were found in the first two minutes of checking whether the bridge could still
+reach Live, by reading an MCP reply closely. Neither had produced an error.
+
+### The re-scan destroyed all 6,712 drum labels
+
+`record()` cleared every tag for a file before writing its own verdicts. That is right
+for the scan's own tags and wrong for anyone else's — and `drums.py` is a separate
+process writing into the same table. A full re-scan therefore wiped it.
+
+Nothing failed. The run reported "analysed 29,870, failed 1" and was telling the truth;
+6,712 labels out of 1.37M tags is not a visible dent in a total. It surfaced only
+because `live_sidecar_status` listed 27 namespaces where there had been 28.
+
+Fixed with `EXTERNAL_NAMESPACES` — a scan deletes what a scan produces, nothing else —
+deliberately an allow-list rather than a heuristic on the `model` column, because an
+allow-list is auditable. The rule that keeps it honest is a test: anything protected
+must be REDERIVABLE WITHOUT A RE-SCAN, since preserving it across a re-analysis means it
+can go stale. `drum` qualifies at seconds and no decoding.
+
+### And the backup I called "verified" was corrupt
+
+Before that scan I copied `sound_index.db` and compared SHA-256 of source and
+destination. **The copy was malformed** — integrity_check reports unused pages, and
+queries against it return nonsense; that is what first made the drum-tag loss look
+impossible to reconstruct.
+
+The hash proved the copy matched the FILE. It could not prove the file was a complete
+DATABASE. The store runs in WAL mode on purpose, so recent pages live in
+`sound_index.db-wal`, and copying the main file alone takes a torn snapshot. A perfectly
+faithful copy of an incomplete thing.
+
+**The lesson is the shape of the error, not the mechanic.** The verification was of the
+wrong property, and it produced total confidence — the same failure as measuring
+"the pipeline produced 531 tags" and calling it success. Backups now go through
+`VACUUM INTO` and are checked with `PRAGMA integrity_check`, which tests the content.
+
+The live index was never at risk: `integrity_check` on it says `ok`, and it has
+throughout.
+
+---
+
 ## 2026-08-16 evening — the re-scan, and the first proof the lastrowid fix holds
 
 29,870 files in 3,523 s (8.48 files/s), 1 pre-existing failure, 0 skipped. Index and code

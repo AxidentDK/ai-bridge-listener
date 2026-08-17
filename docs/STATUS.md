@@ -25,7 +25,7 @@ started" list below and you are current.
 | Index analyzer | `mel2+feat7+discogs-effnet-1+25heads-2+yamnet-1(k15,f0.02)` |
 | Code analyzer | **`feat7`** — index matches; no re-scan outstanding |
 | DSP core | `shared_dsp.py`, byte-identical in both repos, SHA-256 checked by both suites |
-| Drum labels | **6,712** files in the `drum` namespace, refreshed 2026-08-16 after the cymbal fix |
+| Drum labels | **6,712** in the `drum` namespace — destroyed by the re-scan, restored, and now protected (`EXTERNAL_NAMESPACES`) |
 
 **Measured accuracy** (filenames as ground truth, octave errors counted as ERRORS):
 
@@ -84,9 +84,29 @@ low-frequency content to every chroma and moves borderline cases generally. The
 mechanism is supported, not proven exclusive, and 4.8% is more movement than the 2%
 measured on bass loops alone.
 
-**A rollback point exists at `~/.ai-bridge/sound_index.pre-feat7.db`** (482 MB,
-SHA-256-verified copy taken before the scan). Safe to delete once the new keys have been
-lived with for a while.
+### ⚠️ That scan's "verified" backup was CORRUPT — how to take one properly
+
+The rollback point taken before the scan was a `Copy-Item` of `sound_index.db`, checked
+by comparing SHA-256 of source and destination. **It was malformed** — `PRAGMA
+integrity_check` on it reports "Page 24145: never used", and querying it returns
+nonsense (a `GROUP BY namespace` yielded three separate `drum` groups).
+
+The hash proved the copy matched the FILE. It could not prove the file was a complete
+DATABASE. **The store runs in WAL mode** — deliberately, so the bridge can read during a
+scan — and a copy of `sound_index.db` alone leaves the `-wal` behind, so it is a torn
+snapshot of a database whose recent pages live in the other file.
+
+**Take backups through SQLite, never with a file copy:**
+
+```
+sqlite3.connect("file:sound_index.db?mode=ro", uri=True).execute("VACUUM INTO ?", (dst,))
+```
+
+2.6 s for this index, and the result is consistent by construction. Then verify with
+`PRAGMA integrity_check` — checking the CONTENT, not the bytes.
+
+Current good backup: **`~/.ai-bridge/sound_index.backup.db`** (453 MB, integrity_check
+`ok`, 29,870 files / 1,370,929 tags / 6,712 drum labels). The corrupt one was deleted.
 
 ## ⚠️ How to run a FULL scan
 
