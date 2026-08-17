@@ -16,6 +16,42 @@ commit messages, and nobody reconstructs the story from those six months later.
 
 ---
 
+## 2026-08-16 evening — the re-scan, and the first proof the lastrowid fix holds
+
+29,870 files in 3,523 s (8.48 files/s), 1 pre-existing failure, 0 skipped. Index and code
+both on `feat7`.
+
+**The check that mattered was not the tempo or the keys — it was the orphan count.** The
+`lastrowid` bug wrote every re-analysis against a bogus file id while stamping
+`files.analyzer` correctly, so stale verdicts looked fresh and `plan()` would skip them
+forever. It bit ONLY on re-analysis, which is why it survived several full runs of a
+fresh database. This was the first full re-analysis since the fix, so it is the first
+time the fix has been tested under the condition that produced the bug:
+
+    orphaned tags / properties / embeddings     0 / 0 / 0
+    properties per file                         1.0000     (1.43 when corrupt)
+    files not on feat7                          0
+
+**What the fix actually did to stored keys, stated more carefully than I first framed
+it.** 380 of 7,950 keys changed, 4.8%. The two largest intervals are exactly the
+odd-harmonic corrections predicted — a major third down (65 files) and a perfect fifth
+down (60) — which is the strongest evidence yet that the mechanism is real outside
+synthetic square waves.
+
+But the other ~255 changes spread fairly evenly across the remaining intervals, and only
+45 of the 380 changed files are named bass/808/sub. So lowering the chroma floor to A0
+is not a surgical fix for the square-wave pathology; it adds real low-frequency content
+to every chroma and moves borderline cases generally. Earlier I estimated 2% from bass
+loops alone and the true figure is 4.8% across everything with a key. The mechanism is
+supported. It is not proven to be the only thing happening, and I would rather record
+that than claim a cleaner result than the data supports.
+
+A rollback point was taken first (`sound_index.pre-feat7.db`, SHA-256 verified) — worth
+doing precisely because the previous in-place rewrite of these tables went wrong
+silently.
+
+---
+
 ## 2026-08-16 afternoon — a real conversation with Gemini, and three bugs it found
 
 The morning's review was one-shot: send a module, get an answer. The afternoon's was a

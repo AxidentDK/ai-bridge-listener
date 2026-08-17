@@ -8,9 +8,10 @@ everything is green** — "nothing is blocked" is itself worth writing down.
 Last updated: **2026-08-16, end of day** — after the shared-DSP extraction, the drum
 classifier, a full conversational review with Gemini, and a drum-tag refresh.
 
-**Nothing is running, nothing is blocked, both repos are green and pushed.** The one
-deliberate loose end is the re-scan, described below. If you are picking this up cold,
-read that section and `docs/PROGRESS.md`'s top two entries and you are current.
+**Nothing is running, nothing is blocked, both repos are green and pushed, and the
+index now matches the code** — the `feat7` re-scan completed and verified clean. If you
+are picking this up cold, read `docs/PROGRESS.md`'s top two entries and the "Open, not
+started" list below and you are current.
 
 ---
 
@@ -21,8 +22,8 @@ read that section and `docs/PROGRESS.md`'s top two entries and you are current.
 | `ai-bridge-listener` | **56 passing** — features 19, shared_dsp 18, drums 11, db 5, sync 3 |
 | `ai-bridge-for-ableton-live` | **133 tests passing**, incl. the same 3 sync tests |
 | Index | **29,870 files, 1,369,646 tags, 29,869 properties, ZERO orphans** |
-| Index analyzer | `mel2+feat5+discogs-effnet-1+25heads-2+yamnet-1(k15,f0.02)` |
-| Code analyzer | **`feat7`** — see "the one outstanding re-scan" below |
+| Index analyzer | `mel2+feat7+discogs-effnet-1+25heads-2+yamnet-1(k15,f0.02)` |
+| Code analyzer | **`feat7`** — index matches; no re-scan outstanding |
 | DSP core | `shared_dsp.py`, byte-identical in both repos, SHA-256 checked by both suites |
 | Drum labels | **6,712** files in the `drum` namespace, refreshed 2026-08-16 after the cymbal fix |
 
@@ -52,49 +53,40 @@ resolved by `SELECT … WHERE path=?`, and **`PRAGMA foreign_keys` is ON** (SQLi
 disables it per connection by default, so every `REFERENCES` clause was decoration).
 `tests/test_db.py` pins it — write A, write B, re-write A, check A's tags are still A's.
 
-## The re-scan — STARTED 2026-08-16 ~16:45, running
+## ✅ The re-scan — DONE 2026-08-16, index and code now agree
 
-Kim's instruction was *"build but wait doing the rescan"* through the afternoon; he
-released it at the end of the day. Verified running: the analyzer string is being
-written as `mel2+feat7+...`, which is the thing that must change or a re-scan compares
-identical strings, skips every file and **reports success without re-analysing one**.
+29,870 files in 3,523 s (**8.48 files/s**), 1 pre-existing failure, 0 skipped. The index
+and the code are both on **`feat7`**; there is no outstanding re-scan.
 
-**A backup was taken first: `~/.ai-bridge/sound_index.pre-feat7.db`**, verified
-byte-identical by SHA-256 before the scan started. The scan rewrites properties and tags
-in place, and the last time this table was rewritten it was silently corrupted for days
-(see the lastrowid bug above), so a rollback point is cheap insurance rather than
-ceremony.
+**Verified afterwards rather than assumed**, because the last in-place rewrite of these
+tables went silently corrupt for days:
 
-The roots were derived FROM THE INDEX rather than from memory — a count of distinct
-top-level paths over all 29,870 files — because taking the list from Live's own database
-silently produces an index a fifth of the size:
+| check | result |
+|---|---|
+| orphaned tags / properties / embeddings | **0 / 0 / 0** |
+| properties per file | **1.0000** (was 1.43 when corrupt) |
+| files not on `feat7` | **0** — one analyzer string across all 29,870 |
+| errors | 1, unchanged and pre-existing |
 
-    C:/ProgramData/Arturia            13,165
-    <user home>/Documents              7,147   (Xfer, Synapse, u-he, NI, Vital…)
-    C:/ProgramData/Ableton             6,399
-    C:/ProgramData/Akai                  926
-    <sample drive>/<loop packs>        1,675
-    <sample drive>/<free packs>          543
+That first row is the one that matters: the `lastrowid` bug bit only on RE-analysis,
+which is precisely what just ran, so this is the first full re-analysis to prove the fix
+under the condition that broke it.
 
-*The section below describes what the scan is fixing; leave it until the scan finishes,
-then reduce it to a line saying the index and code agree.*
+**Did the bass-key fix reach stored data?** 380 of 7,950 keys changed (4.8%). The two
+largest intervals are exactly the odd-harmonic corrections the fix predicts — a **major
+third down (65)** and a **perfect fifth down (60)**, i.e. files that had been named after
+their 5th and 3rd harmonics.
 
-The code is on **`feat7`**; the index was on **`feat5`**.
+But read that honestly: the remaining ~255 changes are spread fairly evenly across other
+intervals, and only 45 of the 380 changed files are named bass/808/sub. So lowering the
+chroma floor to A0 does more than fix the square-wave pathology — it adds real
+low-frequency content to every chroma and moves borderline cases generally. The
+mechanism is supported, not proven exclusive, and 4.8% is more movement than the 2%
+measured on bass loops alone.
 
-`feat6` changes less than the version bump suggests: **the maths is
-identical** — proven bit-for-bit against `feat5` on 120 real files — but it now runs on
-audio from the shared Kaiser resampler rather than soxr, and a few values move with the
-samples (2 of 42 tempos by 0.1 BPM). The one substantive change is `attack_ms`, which
-was unstable on sustained one-shots and is now stable; roughly 2% of one-shots have a
-stored attack worth distrusting until the scan runs.
-
-`feat7` is the one with real content: the chroma band now starts at A0 instead of A1,
-which stops square and saturated basslines being named a perfect fifth above their root.
-**Stored `key` values for bass material are wrong until the scan runs** — measured at
-about 2% of real bass loops, but wrong in a musically severe way where it lands.
-
-Everything else — tags, key, pitch, tempo, stereo, loudness, drum labels — is current
-and correct. **Nothing is blocked by this.** A full re-scan takes about 65 minutes.
+**A rollback point exists at `~/.ai-bridge/sound_index.pre-feat7.db`** (482 MB,
+SHA-256-verified copy taken before the scan). Safe to delete once the new keys have been
+lived with for a while.
 
 ## ⚠️ How to run a FULL scan
 
@@ -148,7 +140,6 @@ was the hole the obvious `(array, rate)` API would have left open.
   chord / inharmonic). 9/9 synthetic, unreliable on real material (1 of 5 real chords
   routed right). The blocker is a per-file overlap: a real note scores 0.685 and a real
   chord 0.681.
-* **The `feat7` re-scan**, deferred deliberately — see above.
 * **Agent tool-calling in Live** — the sidecar's search tools have never been exercised
   end to end from an agent inside a real session.
 * **rim (44 ± 11) and shaker (35 ± 6)** in the drum classifier, left open ON PURPOSE:
