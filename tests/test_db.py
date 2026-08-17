@@ -17,7 +17,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from listener.db import PROPERTY_COLUMNS, SCHEMA_VERSION, Store  # noqa: E402
+from listener.db import (EXTERNAL_NAMESPACES, PROPERTY_COLUMNS,  # noqa: E402
+                         SCHEMA_VERSION, Store)
 
 
 def _store(tmp, analyzer="test-1"):
@@ -151,6 +152,66 @@ def test_resumability_skips_only_genuinely_unchanged_files():
         assert done["a.wav"] == (10, 100.0, "v1")
         # A changed analyzer must NOT look done — this is what makes a re-scan real.
         assert done["a.wav"][2] != "v2"
+
+
+
+def test_a_rescan_does_not_destroy_tags_it_did_not_write():
+    """The 2026-08-16 re-scan silently deleted all 6,712 drum labels.
+
+    `record()` cleared every tag for a file before writing its own — right for the
+    scan's verdicts, wrong for anyone else's. The drum classifier is a SEPARATE process
+    writing into the same table, so a full re-scan wiped it. Nothing failed: no error,
+    no count mismatch, nothing in the run summary. It surfaced days later only because
+    an MCP status reply listed 27 namespaces where there had been 28.
+
+    A scan owns what a scan produces and nothing else.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "index.db")
+        store = Store(path, "analyzer-1")
+        store.record("A.wav", size=1, mtime=1.0,
+                     tags=[("audio_event", "Snare drum", 0.7, "yamnet")])
+        store.commit()
+
+        # A separate process adds a derived label, exactly as drums.py does.
+        conn = sqlite3.connect(path)
+        file_id = conn.execute("SELECT id FROM files WHERE path='A.wav'").fetchone()[0]
+        conn.execute("INSERT INTO tags VALUES (?, 'drum', 'snare', 0.93, 'drum-linear-1')",
+                     (file_id,))
+        conn.commit()
+        conn.close()
+
+        # Now re-analyse the same file, as a version bump would.
+        store.record("A.wav", size=1, mtime=1.0,
+                     tags=[("audio_event", "Snare drum", 0.8, "yamnet")])
+        store.commit()
+        store.close()
+
+        conn = sqlite3.connect(path)
+        kept = conn.execute(
+            "SELECT label, confidence FROM tags WHERE namespace='drum'").fetchall()
+        rescanned = conn.execute(
+            "SELECT confidence FROM tags WHERE namespace='audio_event'").fetchone()
+        conn.close()
+        assert kept == [("snare", 0.93)], f"the re-scan destroyed a derived tag: {kept}"
+        # And the scan's OWN tag was still replaced, not merged.
+        assert rescanned[0] == 0.8, rescanned
+
+
+def test_every_protected_namespace_is_rederivable_without_a_rescan():
+    """The rule that keeps the exemption honest.
+
+    Preserving a namespace across a re-analysis means it can go STALE — the labels were
+    derived from embeddings that may have just changed. That is only an acceptable
+    trade for something a caller can rebuild cheaply. `drum` qualifies:
+    `drums_cli --apply` reads stored embeddings, decodes nothing, and takes seconds.
+
+    If a namespace is ever added here that needs a full re-scan to rebuild, preserving
+    it would be hiding staleness rather than avoiding data loss.
+    """
+    assert EXTERNAL_NAMESPACES == ("drum",), (
+        "a namespace was added — confirm it can be rebuilt WITHOUT a re-scan, then "
+        "update this test and say how in the comment on EXTERNAL_NAMESPACES")
 
 
 if __name__ == "__main__":

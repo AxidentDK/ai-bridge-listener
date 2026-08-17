@@ -23,6 +23,21 @@ import numpy as np
 #: the evidence for which one a file is.
 SCHEMA_VERSION = 3
 
+#: Namespaces written by something OTHER than the scan, which a scan must therefore not
+#: delete. `drum` comes from `drums.py`, a separate process that reads stored embeddings
+#: and writes labels for the ten words AudioSet has no classes for.
+#:
+#: This exists because the 2026-08-16 re-scan wiped all 6,712 of them. `record()` cleared
+#: every tag for a file before writing its own, which is right for the scan's own
+#: verdicts and wrong for anyone else's. It failed silently — no error, no count
+#: mismatch, nothing in the summary — and surfaced days later only because an MCP status
+#: reply listed one namespace fewer than expected.
+#:
+#: Anything added here must be REDERIVABLE without a re-scan, since preserving it across
+#: a re-analysis means it can go stale. `drum` qualifies: `drums_cli --apply` rebuilds it
+#: from stored embeddings in seconds and decodes nothing.
+EXTERNAL_NAMESPACES = ("drum",)
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -215,7 +230,23 @@ class Store:
         # fails this time kept its old properties and its old embedding while its tags
         # vanished — a row describing audio the analyser can no longer read, with
         # nothing to say it is stale.
-        self.conn.execute("DELETE FROM tags WHERE file_id=?", (file_id,))
+        #
+        # EXCEPT the namespaces this scan does not own. `DELETE FROM tags WHERE
+        # file_id=?` deleted everything, and the drum classifier writes into this same
+        # table from a SEPARATE process — so the 2026-08-16 re-scan silently destroyed
+        # all 6,712 drum labels. Nothing failed and nothing was reported; it was found
+        # days later because an MCP status reply listed 27 namespaces where there had
+        # been 28. A scan owns what a scan produces, and nothing else.
+        #
+        # Not merely defensive: these labels are DERIVED from the stored embeddings, so
+        # after a re-analysis that changes embeddings they are stale rather than wrong,
+        # and re-applying is seconds of work with no decoding. Keeping them makes that a
+        # deliberate choice instead of a silent loss.
+        placeholders = ",".join("?" for _ in EXTERNAL_NAMESPACES)
+        self.conn.execute(
+            f"DELETE FROM tags WHERE file_id=? "                        # noqa: S608
+            f"AND namespace NOT IN ({placeholders})",
+            (file_id, *EXTERNAL_NAMESPACES))
         if error:
             self.conn.execute("DELETE FROM properties WHERE file_id=?", (file_id,))
             self.conn.execute("DELETE FROM embeddings WHERE file_id=?", (file_id,))
