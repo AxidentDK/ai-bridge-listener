@@ -5,13 +5,153 @@ a session ended**, so the next session had to reconstruct it from git log, a SQL
 file, and eventually the raw transcript. **Update it at the end of a session, even when
 everything is green** — "nothing is blocked" is itself worth writing down.
 
-Last updated: **2026-08-16, end of day** — after the shared-DSP extraction, the drum
-classifier, a full conversational review with Gemini, and a drum-tag refresh.
+Last updated: **2026-08-19, small hours** — key spelling, a key-margin gate, and an index
+migration. (Before that: 2026-08-16, the shared-DSP extraction, the drum classifier, a
+conversational review with Gemini, and a drum-tag refresh.)
 
-**Nothing is running, nothing is blocked, both repos are green and pushed, and the
-index now matches the code** — the `feat7` re-scan completed and verified clean. If you
-are picking this up cold, read `docs/PROGRESS.md`'s top two entries and the "Open, not
-started" list below and you are current.
+**Nothing is running. Nothing was re-scanned, and nothing needs to be.** `FEATURE_VERSION`
+is still `feat7` and the model outputs are unchanged; what changed is what gets DERIVED
+from them, and both corrections were derivable from stored columns.
+
+## 2026-08-19 — the key estimator was storing coin-flips
+
+Found from the bridge side, by rendering a piece of music with a known key and measuring
+the render (see the bridge's `docs/LIVE_TEST_PLAN.md`).
+
+**Three fixes in `shared_dsp.py`** — edited here, copied to the bridge, `EXPECTED_SHA256`
+updated in both. New hash `d8fb9dee735b72eba3392385167ceec10af1e5bf1cf087b7b35355a3b7ac5071`.
+
+1. **`MIN_KEY_MARGIN = 0.05`.** `key_from_chroma` had NO margin gate: it stored a key
+   whenever one merely correlated best. A drum-rack preview scored G minor 0.2428 against
+   F♯ minor 0.1944 — four candidates bunched between 0.13 and 0.24 — and the winner flipped
+   between G and E depending on which resampler produced the signal. **27.5% of every key in
+   the index was of that kind.** The threshold is not new: it is the value the bridge already
+   used to call a key "ambiguous", now shared instead of duplicated.
+2. **`key_name(root, mode)`.** `NOTE_NAMES` is all sharps — right for a pitch, wrong for a
+   key. The index held `D# major`, a theoretical key of nine sharps nobody writes. Two
+   tables, because the convention differs by mode: pitch class 8 is A♭ major but G♯ minor.
+3. **`relative_key()`**, so a consumer can name the relative — a key and its relative share
+   every pitch class and chroma cannot separate them even in principle.
+
+**The migration, not a re-scan:** `scripts/migrate_key_margin.py`. The margin was already
+stored as `key_strength` and the spelling is a pure rename, so the whole correction is
+derivable from the database. Re-running the analyzer over 29,870 files to recompute values
+that cannot change would cost hours and carry the one risk this project has actually been
+bitten by. Applied 2026-08-19:
+
+| | |
+|---|---|
+| keys before | 7,997 |
+| cleared (margin < 0.05) | **2,198 (27.5%)** |
+| respelled | 481 |
+| keys after | **5,799** (4,173 major, 1,626 minor), min strength exactly 0.05 |
+| backup | `sound_index.db.20260819-005856.bak` |
+
+Idempotent — a second run reports nothing to do.
+
+✅ **The long-standing red test is fixed, and it was the TEST that was wrong.**
+`test_measure_reproduces_analyze_field_for_field` had been failing on the key assertion;
+fixing keys exposed an older failure underneath — `onsets: 15 vs 18` on
+`Perc Kitchen Kit.adg.ogg`.
+
+The cause: the test built `Prepared` from the mel pass's soxr mono while `analyze`
+re-derives its own through `prepare`. `analyze` accepts `mono` and **ignores it on
+purpose** — that is the whole point of the shared core, both programs measuring one signal
+rather than each picking a resampler. So the test was comparing two DIFFERENT signals and
+calling it pass-through, and on a percussive file three detections landed either side of a
+threshold. It now builds the signal the same way `analyze` does, which is what its own
+docstring always said it was checking. How far the two resamplers diverge is a real
+question and already has its own test
+(`test_owning_the_resampling_moves_the_numbers_only_slightly`, green).
+
+**Both suites are fully green: listener 58, bridge 154.**
+
+## 📌 The octave error is the PRIOR, and the audit proves it
+
+Measured 2026-08-19 over the 546 files whose filenames state a tempo (ground truth: the
+people who cut the loops). Overall 68.9% exact, **9.7% octave-out** — which matches the
+recorded 10% and hides everything interesting. Broken out by tempo it is not noise at all:
+
+| stated tempo | files | octave-out | rate |
+|---|---|---|---|
+| 0–90 | 73 | 22 | **30.1%** |
+| 90–110 | 147 | 1 | 0.7% |
+| 110–130 | 218 | 7 | 3.2% |
+| 130–150 | 76 | 9 | 11.8% |
+| **150–175** | 28 | 12 | **42.9%** |
+| 175+ | 4 | 2 | 50.0% |
+
+**The direction has NO exceptions.** Slow files are doubled (23 of 23); mid and fast files
+are halved (30 of 30). Every octave error moves the tempo TOWARD 120 BPM — the prior's
+centre. The autocorrelation is not confused; the prior is deciding, and it decides home.
+
+**Two distinct failure modes, from the same cause:**
+
+- **Below ~110 the prior ACTIVELY pushes up.** 75 BPM sits 0.678 octaves from the centre
+  and its double 150 sits only 0.322 — the prior prefers the wrong answer outright.
+- **At ~170 the prior is NEUTRAL and nothing else votes.** 85 is −0.497 octaves from 120
+  and 170 is +0.503: equidistant. With the prior abstaining, the ACF's half-time alias
+  wins by default. Bar-fit cannot help either — `Drumloop 12 170BPM.wav` is 2.82 s, which
+  is 2 bars at 170 *and* 1 bar at 85, both whole (see `bar_fit`'s own warning).
+
+**This is the fix `_BPM_PRIOR_WIDTH` already names**: *"The real fix is for the
+events-per-beat term to carry the octave decision so the prior can be flattened; it is not
+strong enough to do that alone yet."* `_EPB_WIDTH = 0.9` octaves is close to flat, which is
+why it cannot. The experiment is a two-parameter sweep of (`_EPB_WIDTH`, `_BPM_PRIOR_WIDTH`)
+scored **per band on the worst band**, not on the mean — judging on the mean is exactly what
+let a 36% collapse on fast material hide behind a headline that barely moved.
+
+### The sweep was run, 2026-08-19. No parameter setting fixes this.
+
+Method: decode the 546 ground-truth files once and cache onsets + flux (they do not depend
+on either parameter), then replay `tempo()` across the grid — 546 decodes instead of 546 x
+36, 33 seconds of decoding. **Harness check first: it reproduces the stored BPM on 546/546
+(100%)**, so the numbers describe the shipped detector and not the scaffolding.
+
+`_EPB_WIDTH` fixed at 0.90, sweeping `_BPM_PRIOR_WIDTH`:
+
+| prior | exact | octave | worst-band exact | worst-band octave | octave per band |
+|---|---|---|---|---|---|
+| **0.45 (shipped)** | 69.4% | 9.4% | 43% | **43%** | 30, 1, 3, 12, **43** |
+| 0.50 | 69.4% | 9.2% | 50% | 36% | 26, 1, 4, 14, 36 |
+| **0.60** | 68.8% | 9.6% | **56%** | **29%** | 23, 1, 6, 18, 29 |
+| 0.80 | 64.0% | 14.4% | 55% | 29% | 22, 1, 15, 26, 29 |
+
+*(bands 0-90, 90-110, 110-130, 130-150, 150-175)*
+
+**TWO RESULTS, AND THE SECOND IS THE IMPORTANT ONE.**
+
+**1. The comment's proposed fix does not work.** `_BPM_PRIOR_WIDTH` says *"the real fix is
+for the events-per-beat term to carry the octave decision so the prior can be flattened"*.
+Swept, tightening EPB makes things WORSE in every band — `epb=0.25` scores 61.9% overall
+against 68.9%. It cannot carry the decision, and this is now measured rather than hoped.
+
+**2. Widening the prior redistributes the damage; it does not reduce it.** 0.60 halves the
+worst band's octave rate (43% → 29%) and lifts its exactness (43% → 56%) — but the OVERALL
+octave rate goes 9.4% → 9.6%. The fast band gains about four files and the two mid bands
+lose about eleven. The prior does not decide how often the octave is wrong, only **which
+music pays for it**. Today that is drum-and-bass and slow material, so mid-tempo does not.
+
+**Recommendation: leave `_BPM_PRIOR_WIDTH` at 0.45 for now.** Unlike the key fixes, changing
+it CHANGES STORED BPM VALUES, so it needs a full re-scan to reach the index — and a re-scan
+should be spent once, on a discriminator that MEASURES the octave instead of assuming it.
+Trading 0.6% overall exactness to move errors sideways does not justify the hours.
+
+**What a real fix looks like** — none of it needs the prior:
+- **Bass-band periodicity.** A 170 BPM DnB loop and its 85 BPM reading differ in where the
+  KICK falls, and the sub band carries that cleanly. The full-band flux does not.
+- **Spectral change per beat.** Half-time doubles the harmonic events per beat; a chroma or
+  band-energy change rate is a different measurement from onset density and is not fooled
+  by the same things.
+- **Onset-interval bimodality.** A halved reading leaves a strong secondary peak at half the
+  chosen interval; its presence is evidence, and it is already computable from the ACF that
+  `_metrical_margin` looks at.
+
+The sweep scripts are in the session scratchpad; the cache builder is ~30 lines and worth
+re-creating rather than preserving.
+
+If you are picking this up cold, read `docs/PROGRESS.md`'s top two entries and the "Open,
+not started" list below and you are current.
 
 ---
 
