@@ -248,7 +248,18 @@ def test_measure_reproduces_analyze_field_for_field():
     for path, _dur, _rate, _ch, _kind in files:
         audio, sr, mono, duration = _decode(path)
         old = F.analyze(audio, sr, mono, duration)
-        new = S.measure(S.Prepared(mono, audio, sr, duration))
+        # THE SAME SIGNAL, because that is what this test claims to check.
+        #
+        # It used to build `Prepared` from the mel pass's soxr mono while `analyze`
+        # re-derives its own through `prepare` — `analyze` accepts `mono` and IGNORES it
+        # on purpose, so that both programs measure one signal instead of each choosing a
+        # resampler. Comparing those two therefore measured RESAMPLER equivalence, not
+        # pass-through, and it failed on `Perc Kitchen Kit.adg.ogg` at 15 onsets versus 18
+        # — three detections either side of a threshold on a percussive file, from two
+        # different signals. How much the resamplers differ is a real question and it
+        # already has its own test: `test_owning_the_resampling_moves_the_numbers_only_
+        # slightly`. This one is about `analyze` passing fields through unchanged.
+        new = S.measure(S.prepare(audio, sr, duration))
         for field in exact_fields:
             assert old.get(field) == new.get(field), (
                 f"{field}: {old.get(field)!r} vs {new.get(field)!r} on {path}")
@@ -455,10 +466,17 @@ def test_the_bridges_key_estimator_would_survive_the_swap():
             continue
         assert ours, f"bridge claims a key the shared core refuses: {hist}"
         score, root, mode = ours[0]
-        assert theirs["key"] == f"{S.NOTE_NAMES[root]} {mode}", (theirs, ours[0])
+        # KEY NAMES, NOT NOTE NAMES. This asserted `NOTE_NAMES`, which is all sharps and
+        # is right for a pitch and wrong for a key: it made "D# major" — nine sharps, a
+        # key nobody writes — the expected answer, so the test defended the bug. Keys are
+        # spelled by `key_name`, and the convention differs between the modes.
+        assert theirs["key"] == f"{S.key_name(root, mode)} {mode}", (theirs, ours[0])
         assert theirs["confidence"] == round(float(score), 3)
         assert theirs["margin"] == round(float(score - ours[1][0]), 3)
-        assert theirs["runner_up"] == f"{S.NOTE_NAMES[ours[1][1]]} {ours[1][2]}"
+        assert theirs["runner_up"] == f"{S.key_name(ours[1][1], ours[1][2])} {ours[1][2]}"
+        # The relative is always named, because chroma cannot separate a key from it.
+        rel_root, rel_mode = S.relative_key(root, mode)
+        assert theirs["relative"] == f"{S.key_name(rel_root, rel_mode)} {rel_mode}"
 
 
 
