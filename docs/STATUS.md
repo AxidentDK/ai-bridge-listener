@@ -137,6 +137,29 @@ it CHANGES STORED BPM VALUES, so it needs a full re-scan to reach the index — 
 should be spent once, on a discriminator that MEASURES the octave instead of assuming it.
 Trading 0.6% overall exactness to move errors sideways does not justify the hours.
 
+### "Resolve tempo by counting bars" — the right principle, and two dead ends
+
+Kim's standing rule is *"tempo octaves are NOT equal; resolve tempo by counting bars."*
+Both halves of that were tested on the 546 cached files, and **both failed**. Recorded so
+neither is retried:
+
+- **Bar counting as a primary ESTIMATOR** — autocorrelate the onset envelope, take the
+  strongest repeat inside the range a bar could occupy (1.26–4.0 s), call it the bar,
+  derive the tempo. Recovers **46%** of the octave errors and only **55%** of the files
+  the shipped detector already gets right. It breaks on patterns that repeat at a half
+  bar or across two (Disco 115 → 152.6, Funk 100 → 133.0).
+- **Bar counting as an octave ARBITER** — keep the detector's pulse, and between T and 2T
+  prefer the one whose bar correlates better than its own half bar, on the reasoning that
+  a real four-beat bar does not repeat at half its length. **Fixes 25 of 54 octave errors
+  and breaks 56 of 376 correct ones — net −31 files, 68.9% → 63.2%.**
+
+⚠️ **What this does NOT show.** Both tests used a crude bar detector: raw autocorrelation
+of a full-band onset envelope. That is not downbeat tracking. A real downbeat model —
+per-band flux, or a beat tracker carrying an explicit bar-level state — is a different and
+much stronger thing, and the principle may well hold once it is one. What is now measured
+is that **"count the bars" is not a five-line addition to the existing envelope**, which is
+what both of these were.
+
 **What a real fix looks like** — none of it needs the prior:
 - **Bass-band periodicity.** A 170 BPM DnB loop and its 85 BPM reading differ in where the
   KICK falls, and the sub band carries that cleanly. The full-band flux does not.
